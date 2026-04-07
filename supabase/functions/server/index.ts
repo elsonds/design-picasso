@@ -14,7 +14,7 @@ import {
   KV_WORKFLOW_CONFIG,
 } from "./runpod.ts";
 
-const app = new Hono();
+const app = new Hono().basePath("/server/make-server-1a0af268");
 
 app.use("*", logger(console.log));
 
@@ -31,7 +31,7 @@ app.use(
 
 // ─── Health check ────────────────────────────────────────────────────────────
 
-app.get("/make-server-1a0af268/health", (c) => {
+app.get("/health", (c) => {
   return c.json({ status: "ok" });
 });
 
@@ -39,7 +39,7 @@ app.get("/make-server-1a0af268/health", (c) => {
 // Replaces the old pod-lifecycle status check. Queries the RunPod Serverless
 // /health endpoint to report worker availability and queue depth.
 
-app.get("/make-server-1a0af268/comfyui/status", async (c) => {
+app.get("/comfyui/status", async (c) => {
   try {
     const health = await getEndpointHealth();
 
@@ -91,7 +91,7 @@ app.get("/make-server-1a0af268/comfyui/status", async (c) => {
 
 // ─── Workflow Config (preserved from old architecture) ───────────────────────
 
-app.get("/make-server-1a0af268/comfyui/config", async (c) => {
+app.get("/comfyui/config", async (c) => {
   try {
     const config = await kv.get(KV_WORKFLOW_CONFIG);
     return c.json({
@@ -118,7 +118,7 @@ app.get("/make-server-1a0af268/comfyui/config", async (c) => {
   }
 });
 
-app.post("/make-server-1a0af268/comfyui/config", async (c) => {
+app.post("/comfyui/config", async (c) => {
   try {
     const body = await c.req.json();
     await kv.set(KV_WORKFLOW_CONFIG, body);
@@ -130,7 +130,7 @@ app.post("/make-server-1a0af268/comfyui/config", async (c) => {
 
 // ─── Upload custom workflow JSON (preserved) ─────────────────────────────────
 
-app.post("/make-server-1a0af268/comfyui/workflow/upload", async (c) => {
+app.post("/comfyui/workflow/upload", async (c) => {
   try {
     const body = await c.req.json();
     const { workflow, type = "default", mapping } = body;
@@ -156,7 +156,7 @@ app.post("/make-server-1a0af268/comfyui/workflow/upload", async (c) => {
   }
 });
 
-app.get("/make-server-1a0af268/comfyui/workflow", async (c) => {
+app.get("/comfyui/workflow", async (c) => {
   try {
     const type = c.req.query("type") || "default";
     const kvKey =
@@ -183,7 +183,7 @@ app.get("/make-server-1a0af268/comfyui/workflow", async (c) => {
 //   5. Store job metadata in KV for the status polling route
 //   6. Return the job_id for frontend polling
 
-app.post("/make-server-1a0af268/comfyui/generate", async (c) => {
+app.post("/comfyui/generate", async (c) => {
   try {
     const body = await c.req.json();
     const {
@@ -294,7 +294,7 @@ app.post("/make-server-1a0af268/comfyui/generate", async (c) => {
 // RunPod Serverless /status/{job_id} endpoint. When the job completes, the
 // serverless worker returns the image as base64 in its output.
 
-app.get("/make-server-1a0af268/comfyui/status/:jobId", async (c) => {
+app.get("/comfyui/status/:jobId", async (c) => {
   try {
     const jobId = c.req.param("jobId");
 
@@ -386,7 +386,7 @@ app.get("/make-server-1a0af268/comfyui/status/:jobId", async (c) => {
 
 // ─── Debug endpoint ──────────────────────────────────────────────────────────
 
-app.get("/make-server-1a0af268/comfyui/debug/check", async (c) => {
+app.get("/comfyui/debug/check", async (c) => {
   try {
     const apiKey = Deno.env.get("RUNPOD_API_KEY");
     const endpointId = Deno.env.get("RUNPOD_ENDPOINT_ID");

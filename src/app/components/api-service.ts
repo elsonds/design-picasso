@@ -1,14 +1,13 @@
 import type { StatusInfo, PodStatus } from "./types";
+import { supabaseUrl, supabaseKey } from "./supabase-client";
 
-// ─── RunPod Direct Integration (bypassing Supabase Edge Functions) ───────────
-const RUNPOD_API_KEY = "";
-const RUNPOD_ENDPOINT_ID = "n5cucbwiu4akbs";
-const RUNPOD_API_BASE = `https://api.runpod.ai/v2/${RUNPOD_ENDPOINT_ID}`;
+// ─── Supabase Edge Function Base URL ────────────────────────────────────────
+const SUPABASE_FUNCTIONS_BASE = `${supabaseUrl}/functions/v1/server/make-server-1a0af268`;
 
-function runpodHeaders(): Record<string, string> {
+function supabaseHeaders(): Record<string, string> {
   return {
     "Content-Type": "application/json",
-    Authorization: `Bearer ${RUNPOD_API_KEY}`,
+    "Authorization": `Bearer ${supabaseKey}`,
   };
 }
 
@@ -848,8 +847,8 @@ export function getCachedStatus(): StatusInfo {
 
 export async function fetchStatus(): Promise<StatusInfo> {
   try {
-    const res = await fetch(`${RUNPOD_API_BASE}/health`, {
-      headers: runpodHeaders(),
+    const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/status`, {
+      headers: supabaseHeaders(),
       signal: AbortSignal.timeout(8000),
     });
 
@@ -863,31 +862,11 @@ export async function fetchStatus(): Promise<StatusInfo> {
     }
 
     const health = await res.json();
-    const totalWorkers =
-      (health.workers?.idle || 0) +
-      (health.workers?.running || 0) +
-      (health.workers?.initializing || 0);
-    const isReady =
-      (health.workers?.idle || 0) > 0 || (health.workers?.running || 0) > 0;
-
-    let podStatus: PodStatus = "unknown";
-    let message = "Checking status...";
-
-    if (isReady) {
-      podStatus = "ready";
-      message = `Serverless Ready`;
-    } else if ((health.workers?.initializing || 0) > 0) {
-      podStatus = "starting";
-      message = `Worker initializing...`;
-    } else if (totalWorkers === 0) {
-      podStatus = "ready";
-      message = "Serverless Ready";
-    }
 
     cachedStatus = {
-      connected: true,
-      pod_status: podStatus,
-      message,
+      connected: health.connected ?? true,
+      pod_status: (health.pod_status as PodStatus) ?? "ready",
+      message: health.message ?? "Serverless Ready",
       workers: health.workers,
       jobs: health.jobs,
     };
@@ -958,9 +937,9 @@ export async function cancelGeneration() {
     const jobId = currentJobId;
     currentJobId = null;
     try {
-      await fetch(`${RUNPOD_API_BASE}/cancel/${jobId}`, {
+      await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/cancel/${jobId}`, {
         method: "POST",
-        headers: runpodHeaders(),
+        headers: supabaseHeaders(),
       });
       console.log(`[Picasso] RunPod job ${jobId} cancel requested`);
     } catch (err) {
@@ -1079,10 +1058,23 @@ export async function generateImage(
       input.images = images;
     }
 
-    const submitRes = await fetch(`${RUNPOD_API_BASE}/run`, {
+    const submitRes = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/generate`, {
       method: "POST",
-      headers: runpodHeaders(),
-      body: JSON.stringify({ input }),
+      headers: supabaseHeaders(),
+      body: JSON.stringify({
+        prompt: req.prompt,
+        width,
+        height,
+        seed,
+        style: req.style,
+        mode: hasReference ? "controlnet" : undefined,
+        reference_image: hasReference ? req.referenceImage : undefined,
+        lora_name: loraName,
+        lora_strength: loraStrength,
+        // Also send the pre-built workflow for the edge function to use
+        _workflow: workflow,
+        _images: images,
+      }),
       signal,
     });
 
@@ -1092,16 +1084,17 @@ export async function generateImage(
     }
 
     const submitData = await submitRes.json();
-    if (!submitData.id) {
-      throw new Error(`No job ID returned: ${JSON.stringify(submitData).substring(0, 200)}`);
+    const jobId = submitData.job_id || submitData.id;
+    if (!jobId) {
+      throw new Error(submitData.error || `No job ID returned: ${JSON.stringify(submitData).substring(0, 200)}`);
     }
 
-    currentJobId = submitData.id;
-    console.log(`[Picasso] Job submitted: ${submitData.id}`);
+    currentJobId = jobId;
+    console.log(`[Picasso] Job submitted: ${jobId}`);
     onPhase?.("Generation queued...", 15);
 
     // Poll for result
-    return await pollRunPodJob(submitData.id, req, seed, signal, onPhase);
+    return await pollRunPodJob(jobId, req, seed, signal, onPhase);
   } catch (err) {
     const isCancelled = signal.aborted || (err as Error).name === "AbortError" || (err as Error).message?.includes("cancelled");
     if (isCancelled) {
@@ -1163,8 +1156,8 @@ async function pollRunPodJob(
     if (phase) onPhase?.(phase.msg, phase.pct);
 
     try {
-      const res = await fetch(`${RUNPOD_API_BASE}/status/${jobId}`, {
-        headers: runpodHeaders(),
+      const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/status/${jobId}`, {
+        headers: supabaseHeaders(),
         signal,
       });
 
@@ -1182,33 +1175,37 @@ async function pollRunPodJob(
         throw new Error(errorMsg);
       }
 
-      if (data.status === "COMPLETED" && data.output) {
-        // Extract image
-        let imageBase64 = data.output.image || "";
-        if (!imageBase64 && data.output.images?.[0]?.data) {
-          imageBase64 = data.output.images[0].data;
+      if (data.status === "COMPLETED") {
+        // Edge Function returns image directly, or check data.output for raw RunPod
+        let imageUrl = data.image || "";
+        if (!imageUrl && data.output) {
+          let imageBase64 = data.output.image || "";
+          if (!imageBase64 && data.output.images?.[0]?.data) {
+            imageBase64 = data.output.images[0].data;
+          }
+          if (imageBase64) {
+            imageUrl = imageBase64.startsWith("data:")
+              ? imageBase64
+              : `data:image/png;base64,${imageBase64}`;
+          }
         }
 
-        if (imageBase64) {
-          const imageUrl = imageBase64.startsWith("data:")
-            ? imageBase64
-            : `data:image/png;base64,${imageBase64}`;
-
+        if (imageUrl) {
           onPhase?.("Done!", 100);
           console.log(`[Picasso] Job ${jobId} completed`);
 
           return {
             success: true,
             image: imageUrl,
-            seed: data.output.seed ?? seed,
-            executionTime: data.output.execution_time ?? 0,
+            seed: data.seed ?? data.output?.seed ?? seed,
+            executionTime: data.execution_time ?? data.output?.execution_time ?? 0,
             mode: req.referenceImage ? "ControlNet" : "Prompt",
             width: req.width ?? 1328,
             height: req.height ?? 1328,
           };
         }
 
-        throw new Error("Generation completed but no image returned");
+        throw new Error(data.error || "Generation completed but no image returned");
       }
 
       // IN_QUEUE or IN_PROGRESS — keep polling
