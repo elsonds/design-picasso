@@ -422,4 +422,111 @@ app.get("/comfyui/debug/check", async (c) => {
   }
 });
 
+// ─── LLM Proxy (OpenAI + Gemini) ────────────────────────────────────────────
+// Proxies LLM requests so API keys stay server-side.
+// Frontend sends messages + config, Edge Function adds the API key and forwards.
+
+app.post("/llm/chat", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { messages, provider = "openai", model, temperature = 0.8, maxTokens = 2000, stream = true } = body;
+
+    if (!messages || !Array.isArray(messages)) {
+      return c.json({ error: "messages array is required" }, 400);
+    }
+
+    if (provider === "gemini") {
+      // ── Gemini ──
+      const apiKey = Deno.env.get("GEMINI_API_KEY");
+      if (!apiKey) return c.json({ error: "GEMINI_API_KEY not configured" }, 500);
+
+      const geminiModel = model || "gemini-2.0-flash";
+
+      // Convert messages to Gemini format
+      let systemInstruction: string | null = null;
+      const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
+      for (const msg of messages) {
+        if (msg.role === "system") {
+          systemInstruction = (systemInstruction ? systemInstruction + "\n\n" : "") + msg.content;
+        } else {
+          contents.push({
+            role: msg.role === "assistant" ? "model" : "user",
+            parts: [{ text: msg.content }],
+          });
+        }
+      }
+
+      const geminiBody: Record<string, unknown> = {
+        contents,
+        generationConfig: { temperature, maxOutputTokens: maxTokens },
+      };
+      if (systemInstruction) {
+        geminiBody.systemInstruction = { parts: [{ text: systemInstruction }] };
+      }
+
+      const endpoint = stream ? "streamGenerateContent?alt=sse" : "generateContent";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:${endpoint}&key=${apiKey}`;
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(geminiBody),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        return c.json({ error: `Gemini API error (${res.status}): ${text.substring(0, 200)}` }, res.status);
+      }
+
+      // Stream passthrough
+      return new Response(res.body, {
+        status: res.status,
+        headers: {
+          "Content-Type": res.headers.get("Content-Type") || "text/event-stream",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    } else {
+      // ── OpenAI ──
+      const apiKey = Deno.env.get("OPENAI_API_KEY");
+      if (!apiKey) return c.json({ error: "OPENAI_API_KEY not configured" }, 500);
+
+      const openaiModel = model || "gpt-4o-mini";
+      const url = "https://api.openai.com/v1/chat/completions";
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: openaiModel,
+          messages,
+          temperature,
+          max_tokens: maxTokens,
+          stream,
+        }),
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        return c.json({ error: `OpenAI API error (${res.status}): ${text.substring(0, 200)}` }, res.status);
+      }
+
+      // Stream passthrough
+      return new Response(res.body, {
+        status: res.status,
+        headers: {
+          "Content-Type": res.headers.get("Content-Type") || "text/event-stream",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+  } catch (err: unknown) {
+    console.log("LLM proxy error:", (err as Error).message);
+    return c.json({ error: `LLM proxy error: ${(err as Error).message}` }, 500);
+  }
+});
+
 Deno.serve(app.fetch);

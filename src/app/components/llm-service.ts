@@ -1,7 +1,12 @@
 /**
- * OpenAI Chat Service
- * Handles streaming chat completions with real-time SSE support
+ * LLM Chat Service
+ * Routes all LLM requests through Supabase Edge Function proxy.
+ * API keys are stored as Supabase secrets — never in the browser.
  */
+
+import { supabaseUrl, supabaseKey } from './supabase-client';
+
+const LLM_PROXY_URL = `${supabaseUrl}/functions/v1/server/make-server-1a0af268/llm/chat`;
 
 export type LLMProvider = 'openai' | 'gemini';
 
@@ -27,7 +32,6 @@ const DEFAULT_CONFIG: Partial<LLMConfig> = {
 
 const STORAGE_KEY = 'picasso_llm_config';
 const PROVIDER_KEY = 'picasso_llm_provider';
-const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions';
 
 /**
  * Get/set active LLM provider
@@ -116,22 +120,21 @@ export async function streamChat(
   config: LLMConfig,
   onChunk: (chunk: string) => void
 ): Promise<string> {
-  const payload = {
-    model: config.model,
-    messages: messages,
-    temperature: config.temperature,
-    max_tokens: config.maxTokens,
-    stream: true,
-  };
-
   try {
-    const response = await fetch(OPENAI_API_URL, {
+    const response = await fetch(LLM_PROXY_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
+        'Authorization': `Bearer ${supabaseKey}`,
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        messages,
+        provider: 'openai',
+        model: config.model,
+        temperature: config.temperature,
+        maxTokens: config.maxTokens,
+        stream: true,
+      }),
     });
 
     if (!response.ok) {

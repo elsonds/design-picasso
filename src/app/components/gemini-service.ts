@@ -1,10 +1,12 @@
 /**
  * Gemini Chat Service
- * Handles streaming chat completions via Google's Generative Language API
- * Drop-in alternative to OpenAI for the conceptualise flow
+ * Routes through Supabase Edge Function proxy — API keys stay server-side.
  */
 
 import type { ChatMessage } from './llm-service';
+import { supabaseUrl, supabaseKey } from './supabase-client';
+
+const LLM_PROXY_URL = `${supabaseUrl}/functions/v1/server/make-server-1a0af268/llm/chat`;
 
 export interface GeminiConfig {
   apiKey: string;
@@ -57,66 +59,32 @@ export function validateGeminiConfig(config: Partial<GeminiConfig>): string | nu
   return null;
 }
 
-// ─── Streaming chat via Gemini REST API ──────────────────────────────────────
+// ─── Streaming chat via Supabase Edge Function proxy ────────────────────────
 
 /**
- * Convert our ChatMessage format to Gemini's contents format.
- * Gemini uses "user" and "model" roles, and system instructions go separately.
- */
-function convertMessages(messages: ChatMessage[]): {
-  systemInstruction: string | null;
-  contents: Array<{ role: string; parts: Array<{ text: string }> }>;
-} {
-  let systemInstruction: string | null = null;
-  const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
-
-  for (const msg of messages) {
-    if (msg.role === 'system') {
-      // Gemini treats system instructions separately
-      systemInstruction = (systemInstruction ? systemInstruction + '\n\n' : '') + msg.content;
-    } else {
-      contents.push({
-        role: msg.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: msg.content }],
-      });
-    }
-  }
-
-  return { systemInstruction, contents };
-}
-
-/**
- * Stream chat completions from Gemini API
- * Parses SSE-like stream and calls onChunk for each text delta
+ * Stream chat completions via the LLM proxy
+ * The Edge Function handles Gemini format conversion server-side
  */
 export async function streamGeminiChat(
   messages: ChatMessage[],
   config: GeminiConfig,
   onChunk: (chunk: string) => void
 ): Promise<string> {
-  const { systemInstruction, contents } = convertMessages(messages);
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:streamGenerateContent?alt=sse&key=${config.apiKey}`;
-
-  const body: Record<string, unknown> = {
-    contents,
-    generationConfig: {
-      temperature: config.temperature,
-      maxOutputTokens: config.maxTokens,
-    },
-  };
-
-  if (systemInstruction) {
-    body.systemInstruction = {
-      parts: [{ text: systemInstruction }],
-    };
-  }
-
   try {
-    const response = await fetch(url, {
+    const response = await fetch(LLM_PROXY_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${supabaseKey}`,
+      },
+      body: JSON.stringify({
+        messages,
+        provider: 'gemini',
+        model: config.model,
+        temperature: config.temperature,
+        maxTokens: config.maxTokens,
+        stream: true,
+      }),
     });
 
     if (!response.ok) {
@@ -204,42 +172,10 @@ export async function geminiChat(
   messages: ChatMessage[],
   config: GeminiConfig
 ): Promise<string> {
-  const { systemInstruction, contents } = convertMessages(messages);
-
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`;
-
-  const body: Record<string, unknown> = {
-    contents,
-    generationConfig: {
-      temperature: config.temperature,
-      maxOutputTokens: config.maxTokens,
-    },
-  };
-
-  if (systemInstruction) {
-    body.systemInstruction = {
-      parts: [{ text: systemInstruction }],
-    };
-  }
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+  // Use streaming version and accumulate
+  let accumulated = '';
+  await streamGeminiChat(messages, config, (chunk) => {
+    accumulated += chunk;
   });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    let errorMessage = `Gemini API error (${response.status})`;
-    try {
-      const errorJson = JSON.parse(errorText);
-      errorMessage = errorJson.error?.message || errorMessage;
-    } catch {
-      errorMessage = errorText || errorMessage;
-    }
-    throw new Error(errorMessage);
-  }
-
-  const json = await response.json();
-  return json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  return accumulated;
 }
