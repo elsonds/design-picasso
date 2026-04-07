@@ -6,7 +6,8 @@ import { PromptBar } from "./components/prompt-bar";
 import { ImageGridPanel, type GeneratedImage } from "./components/image-grid-panel";
 import { generateImage, cancelGeneration } from "./components/api-service";
 import type { StyleKey } from "./components/brand-logos";
-import { AuthProvider } from "./components/auth-context";
+import { AuthProvider, useAuth } from "./components/auth-context";
+import { LoginScreen } from "./components/login-screen";
 import { streamChat, chat, getStoredConfig, saveConfig, isConfigured, getActiveProvider, type LLMConfig, type LLMProvider } from "./components/llm-service";
 import { streamGeminiChat, geminiChat, getStoredGeminiConfig, saveGeminiConfig, isGeminiConfigured } from "./components/gemini-service";
 import { buildConceptualiseMessages, parseConcepts, type Concept } from "./components/llm-prompts";
@@ -15,7 +16,28 @@ import { getLoraConfig } from "./components/lora-config";
 import { getRestructureSkill } from "./components/prompt-skills";
 
 function MainApp() {
-  // TODO: Re-enable auth later
+  return (
+    <AuthProvider>
+      <AuthGate />
+    </AuthProvider>
+  );
+}
+
+function AuthGate() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="w-full h-screen flex items-center justify-center" style={{ background: "#0d0d12" }}>
+        <div className="text-[#5a5a64] text-sm">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <LoginScreen />;
+  }
+
   return <AuthenticatedApp />;
 }
 
