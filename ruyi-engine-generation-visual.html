@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ruyi Engine - Masterpiece Loader</title>
+    <style>
+        :root {
+            /* Monochromatic Slate Dark Palette */
+            --bg-dark: #0d0e15;
+            --bg-light: #1a1c29;
+            --canvas-dark: #0f172a;
+            --canvas-light: #1e293b;
+            --highlight-subtle: #475569;
+            --highlight-bright: #e2e8f0;
+            --text-color: #cbd5e1;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-dark);
+            color: var(--text-color);
+            font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            background-image: radial-gradient(circle at center, var(--bg-light) 0%, var(--bg-dark) 100%);
+        }
+
+        .loader-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            max-width: 400px;
+            width: 100%;
+            z-index: 2;
+        }
+
+        /* -------------------------------------
+           STATIC VISUAL CONTAINER
+        -------------------------------------- */
+        .visual-container {
+            position: relative;
+            width: 280px;
+            height: 280px;
+            margin-bottom: 2.5rem;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Layer 1: SVG Seed (Bouncing Ball with Brand Gradient) */
+        .svg-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 280px;
+            height: 280px;
+            z-index: 4; 
+            pointer-events: none;
+        }
+
+        #bouncing-ball {
+            fill: url(#magic-grad);
+            filter: drop-shadow(0 0 10px rgba(225, 17, 111, 0.6));
+            transition: opacity 0.1s ease;
+        }
+
+        /* Layer 2: The Pixel Grid */
+        .pixel-grid {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 240px;
+            height: 240px;
+            display: grid;
+            grid-template-columns: repeat(20, 1fr);
+            grid-template-rows: repeat(20, 1fr);
+            z-index: 2;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .pixel {
+            background: transparent;
+            opacity: 0;
+            border: 1px solid transparent; 
+            box-sizing: border-box;
+            filter: brightness(1); 
+        }
+
+        /* Permanent settling animation when pixels lock into the dark canvas. */
+        .pixel.active {
+            animation: pixel-lock 0.6s ease-out forwards;
+        }
+
+        @keyframes pixel-lock {
+            0% { opacity: 0; background: transparent; border-color: rgba(148, 163, 184, 0.4); filter: brightness(1); }
+            30% { opacity: 1; background: var(--highlight-subtle); border-color: transparent; filter: brightness(1.2); }
+            100% { opacity: 1; background: var(--px-bg); border-color: transparent; filter: brightness(1); }
+        }
+
+        /* Phase 3: The Left-to-Right Dynamic Shimmer Sweep */
+        .pixel.materialized {
+            animation: pixel-shimmer-sweep 3.5s infinite ease-in-out forwards;
+        }
+
+        @keyframes pixel-shimmer-sweep {
+            0%   { opacity: 1; filter: brightness(1.8); box-shadow: inset 0 0 5px rgba(226, 232, 240, 0.2); }
+            20%  { opacity: 0.2; filter: brightness(0.4); box-shadow: none; }
+            100% { opacity: 0.2; filter: brightness(0.4); box-shadow: none; } 
+        }
+
+        /* Layer 3: Solid Materialized Canvas Background */
+        .canvas-solid {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 240px;
+            height: 240px;
+            background: linear-gradient(135deg, var(--canvas-light), var(--canvas-dark)); 
+            border-radius: 4px;
+            opacity: 0;
+            transition: opacity 1.5s ease;
+            z-index: 1;
+        }
+
+        .visual-container.materialize .canvas-solid {
+            opacity: 1;
+        }
+
+        /* Layer 4: Final Touches Split-Trace & Star Frame */
+        .final-border-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 240px;
+            height: 240px;
+            z-index: 5;
+            pointer-events: none;
+            overflow: visible;
+        }
+
+        .shine-stroke {
+            fill: none;
+            stroke: url(#trace-grad);
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-dasharray: 480; 
+            stroke-dashoffset: 480; /* Starts hidden at Bottom-Left */
+            opacity: 0;
+        }
+
+        .sparkle-star {
+            transform-origin: 240px 0px; /* Anchored exactly at Top Right corner */
+            opacity: 0;
+        }
+
+        /* Triggers exactly ONCE when "Artwork Ready!" is announced */
+        .visual-container.artwork-ready .shine-stroke {
+            animation: trace-split 2.5s cubic-bezier(0.4, 0.0, 0.2, 1) forwards;
+        }
+
+        .visual-container.artwork-ready .sparkle-star {
+            animation: star-burst-split 2.5s cubic-bezier(0.4, 0.0, 0.2, 1) forwards;
+        }
+
+        @keyframes trace-split {
+            0% { stroke-dashoffset: 480; opacity: 0; }
+            10% { opacity: 1; }
+            80% { stroke-dashoffset: 0; opacity: 1; } /* Beams crash at Top-Right */
+            100% { stroke-dashoffset: 0; opacity: 0; } /* Fade out completely */
+        }
+
+        @keyframes star-burst-split {
+            0%, 75% { transform: scale(0) rotate(-45deg); opacity: 0; }
+            85% { transform: scale(0.35) rotate(0deg); opacity: 1; filter: drop-shadow(0 0 15px rgba(255, 255, 255, 1)); }
+            100% { transform: scale(0) rotate(45deg); opacity: 0; } /* Fade out cleanly */
+        }
+
+        /* -------------------------------------
+           TYPOGRAPHY & UI
+        -------------------------------------- */
+        .status-text {
+            font-size: 1.05rem;
+            font-weight: 400;
+            letter-spacing: 1px;
+            color: var(--highlight-bright);
+            margin-bottom: 1.5rem;
+            text-align: center;
+            height: 1.5rem;
+            transition: opacity 0.4s ease-in-out;
+        }
+        .status-text.fade { opacity: 0; }
+
+        .progress-container {
+            width: 80%;
+            height: 3px;
+            background-color: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #E1116F, #FFAE01, #E1116F);
+            background-size: 200% 100%;
+            border-radius: 4px;
+            animation: gradient-shift 2s linear infinite;
+            transition: width 0.3s ease;
+        }
+        @keyframes gradient-shift { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+        .eta {
+            margin-top: 1rem;
+            font-size: 0.75rem;
+            color: #64748b;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="loader-wrapper">
+        <div class="visual-container" id="visual-container">
+            
+            <!-- Global SVG Defs -->
+            <svg width="0" height="0" style="position:absolute">
+                <defs>
+                    <linearGradient id="magic-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+                        <stop offset="0%" stop-color="#FFAE01"/>
+                        <stop offset="50%" stop-color="#E1116F"/>
+                        <stop offset="100%" stop-color="#8239DF"/>
+                    </linearGradient>
+                    <linearGradient id="trace-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+                        <stop offset="0%" stop-color="rgba(255,255,255,0)"/>
+                        <stop offset="60%" stop-color="rgba(255,255,255,0.4)"/>
+                        <stop offset="100%" stop-color="#ffffff"/>
+                    </linearGradient>
+                    <g id="brand-star">
+                        <path d="M800.281 86.9852C801.514 88.3596 802.713 102.078 803.415 105.415C811.659 144.611 829.207 147.679 864.238 155.929C852.443 156.603 835.608 160.195 825.576 166.832C806.402 179.518 804.325 203.446 800.046 223.756C799.263 222.145 799.025 220.207 798.839 218.427C794.186 174.106 778.19 161.062 735.844 155.839C748.133 153.267 764.406 150.722 775.062 144.228C789.062 135.696 794.855 118.936 797.93 103.688C798.953 98.6156 798.906 93.0121 800.138 87.596L800.281 86.9852Z" 
+                              fill="#FEFEFE" transform="translate(-800, -155.3)"/>
+                    </g>
+                </defs>
+            </svg>
+
+            <!-- Layer 1: SVG Seed -->
+            <svg class="svg-layer" viewBox="0 0 280 280" xmlns="http://www.w3.org/2000/svg">
+                <ellipse id="bouncing-ball" cx="140" cy="140" rx="6" ry="6" />
+            </svg>
+
+            <!-- Layer 2: Solid Canvas Base -->
+            <div class="canvas-solid"></div>
+
+            <!-- Layer 3: Pixel Grid Fill -->
+            <div class="pixel-grid" id="pixel-grid"></div>
+
+            <!-- Layer 4: Final Touches Splitting Traces -->
+            <svg class="final-border-layer" viewBox="0 0 240 240" xmlns="http://www.w3.org/2000/svg">
+                <!-- Path 1: Starts Bottom-Left, goes UP Left side, RIGHT across Top side -->
+                <path d="M 0,240 L 0,0 L 240,0" class="shine-stroke" />
+                <!-- Path 2: Starts Bottom-Left, goes RIGHT across Bottom side, UP Right side -->
+                <path d="M 0,240 L 240,240 L 240,0" class="shine-stroke" />
+                <use href="#brand-star" class="sparkle-star" x="240" y="0" />
+            </svg>
+
+        </div>
+
+        <div class="status-text" id="status-text">Initializing Request...</div>
+        
+        <div class="progress-container">
+            <div class="progress-bar" id="progress-bar"></div>
+        </div>
+
+        <div class="eta">Cold start ~ <span id="time-left">120</span>s remaining</div>
+    </div>
+
+    <script>
+        const DEMO_MODE = false; 
+        const TIME_MULTIPLIER = DEMO_MODE ? 0.1 : 1;
+
+        const loadingStates = [
+            { text: "Queuing generation..", duration: 5, phase: "prep" },
+            { text: "Starting GPU pod....", duration: 15, phase: "prep" },
+            { text: "Pod booting up...", duration: 25, phase: "prep" },
+            { text: "Pod ready! Submitting workflow...", duration: 5, phase: "prep" },
+            { text: "Generation in progress...", duration: 10, phase: "filling" },
+            { text: "Waking up GPU...", duration: 15, phase: "filling" },
+            { text: "Loading models...", duration: 20, phase: "filling" },
+            { text: "Generating...", duration: 10, phase: "filling" },
+            { text: "Painting details...", duration: 10, phase: "materialize" }, 
+            { text: "Adding final touches.....", duration: 5, phase: "final-touches" } 
+        ];
+
+        const visualContainer = document.getElementById('visual-container');
+        const statusEl = document.getElementById('status-text');
+        const progressBarEl = document.getElementById('progress-bar');
+        const timeLeftEl = document.getElementById('time-left');
+        const ball = document.getElementById('bouncing-ball');
+        const pixelGrid = document.getElementById('pixel-grid');
+        
+        const totalDuration = loadingStates.reduce((acc, state) => acc + state.duration, 0);
+        let currentStateIndex = 0;
+        let currentPhase = "prep";
+        let shimmerApplied = false;
+
+        // ==========================================
+        // DYNAMIC ACCELERATION BOUNCE MAP
+        // ==========================================
+        const bounceMap = [];
+        let currTime = 0;
+        let currentBounceDur = 2200; 
+
+        while (currTime < 45000) {
+            if (currTime + currentBounceDur >= 45000) {
+                let remaining = 45000 - currTime;
+                if (remaining < 400 && bounceMap.length > 0) {
+                    bounceMap[bounceMap.length - 1].dur += remaining;
+                } else {
+                    bounceMap.push({ start: currTime, dur: remaining });
+                }
+                break;
+            }
+            bounceMap.push({ start: currTime, dur: currentBounceDur });
+            currTime += currentBounceDur;
+            currentBounceDur = Math.max(800, currentBounceDur * 0.92); 
+        }
+
+        // ==========================================
+        // PIXEL GRID SETUP & SORTING
+        // ==========================================
+        const TOTAL_PIXELS = 400; 
+        const pixels = [];
+        const canvasColors = ['#1e293b', '#0f172a', '#141e30', '#1a2436'];
+        const fillOrder = [];
+
+        for (let i = 0; i < TOTAL_PIXELS; i++) {
+            const p = document.createElement('div');
+            p.className = 'pixel';
+            
+            const px = i % 20;
+            const py = Math.floor(i / 20);
+            const ratio = px / 19;
+            let r, g, b;
+            
+            if (ratio < 0.5) { 
+                const p2 = ratio * 2;
+                r = Math.round(255 + (225 - 255) * p2);
+                g = Math.round(174 + (17 - 174) * p2);
+                b = Math.round(1 + (111 - 1) * p2);
+            } else { 
+                const p2 = (ratio - 0.5) * 2;
+                r = Math.round(225 + (130 - 225) * p2);
+                g = Math.round(17 + (57 - 17) * p2);
+                b = Math.round(111 + (223 - 111) * p2);
+            }
+            p.style.setProperty('--grad-intense', `rgba(${r}, ${g}, ${b}, 0.6)`);
+            p.style.setProperty('--grad-fade', `rgba(${r}, ${g}, ${b}, 0.2)`);
+
+            pixelGrid.appendChild(p);
+            pixels.push(p);
+
+            const dist = Math.sqrt(Math.pow(px - 9.5, 2) + Math.pow(py - 9.5, 2));
+            fillOrder.push({ index: i, score: dist + (Math.random() * 6) });
+        }
+        fillOrder.sort((a, b) => a.score - b.score);
+
+        let fillingStartTimeMs = 0;
+        let fillingEndTimeMs = 0;
+        let calcCumulative = 0;
+        loadingStates.forEach(state => {
+            const stateDurationMs = state.duration * 1000;
+            if (state.phase === "filling" && fillingStartTimeMs === 0) fillingStartTimeMs = calcCumulative;
+            if (state.phase === "filling") fillingEndTimeMs = calcCumulative + stateDurationMs;
+            calcCumulative += stateDurationMs;
+        });
+
+        // ==========================================
+        // VISUAL EFFECTS LOGIC
+        // ==========================================
+        function updateState(state) {
+            currentPhase = state.phase;
+            statusEl.classList.add('fade');
+            setTimeout(() => {
+                statusEl.innerText = state.text;
+                statusEl.classList.remove('fade');
+            }, 400);
+
+            if (currentPhase === 'materialize') {
+                visualContainer.classList.add('materialize');
+            }
+        }
+
+        function triggerRipple(isMassive = false, intensity = 0.5) {
+            const speed = isMassive ? 70 : 45; 
+
+            pixels.forEach((p, i) => {
+                if (p.classList.contains('active')) return; 
+
+                const px = i % 20;
+                const py = Math.floor(i / 20);
+                const dist = Math.sqrt(Math.pow(px - 9.5, 2) + Math.pow(py - 9.5, 2));
+                const delay = Math.max(0, dist - 0.707) * speed; 
+
+                setTimeout(() => {
+                    if (!p.classList.contains('active')) {
+                        if (isMassive) {
+                            p.animate([
+                                { opacity: 1, borderColor: p.style.getPropertyValue('--grad-intense'), background: 'transparent' },
+                                { opacity: 1, borderColor: p.style.getPropertyValue('--grad-fade'), background: 'transparent', offset: 0.2 },
+                                { opacity: 0, borderColor: 'transparent', background: 'transparent' }
+                            ], { duration: 1600, easing: 'ease-out' });
+                        } else {
+                            p.animate([
+                                { opacity: 0, borderColor: 'transparent', background: 'transparent' },
+                                { opacity: intensity, borderColor: 'rgba(148, 163, 184, 0.4)', background: 'transparent', offset: 0.5 },
+                                { opacity: 0, borderColor: 'transparent', background: 'transparent' }
+                            ], { duration: 1200, easing: 'ease-in-out' });
+                        }
+                    }
+                }, delay);
+            });
+        }
+
+        function activatePixel(index) {
+            const p = pixels[index];
+            p.classList.add('active');
+            const settledColor = canvasColors[Math.floor(Math.random() * canvasColors.length)];
+            p.style.setProperty('--px-bg', settledColor);
+        }
+
+        // ==========================================
+        // MAIN ENGINE RENDERING LOOP
+        // ==========================================
+        function startRuyiEngine() {
+            const startTime = Date.now();
+            const realTotalMs = totalDuration * 1000 * TIME_MULTIPLIER;
+
+            let cumulativeTime = 0;
+            const timeline = loadingStates.map(state => {
+                const triggerTime = cumulativeTime;
+                cumulativeTime += state.duration * 1000 * TIME_MULTIPLIER;
+                return { ...state, triggerTime: triggerTime };
+            });
+
+            updateState(timeline[0]);
+
+            let lastBounceIndex = -1;
+            let ballSlammed = false;
+
+            function tick() {
+                const now = Date.now();
+                const elapsedMs = now - startTime;
+                const simulatedTime = elapsedMs / TIME_MULTIPLIER; 
+
+                progressBarEl.style.width = `${Math.min((elapsedMs / realTotalMs) * 100, 100)}%`;
+                timeLeftEl.innerText = Math.max(Math.ceil((realTotalMs - elapsedMs) / 1000), 0);
+
+                if (currentStateIndex < timeline.length - 1) {
+                    if (elapsedMs >= timeline[currentStateIndex + 1].triggerTime) {
+                        currentStateIndex++;
+                        updateState(timeline[currentStateIndex]);
+                    }
+                }
+
+                // ----------------------------------------------------
+                // ANIMATION LOGIC: Spool-up Bouncing Physics (0s to 45s)
+                // ----------------------------------------------------
+                if (simulatedTime < 45000) {
+                    let currentBounce = bounceMap.findLast(b => simulatedTime >= b.start);
+                    if (!currentBounce) currentBounce = bounceMap[0];
+                    
+                    const cycle = bounceMap.indexOf(currentBounce);
+                    const progress = (simulatedTime - currentBounce.start) / currentBounce.dur; 
+
+                    const arc = 4 * progress * (1 - progress); 
+                    ball.setAttribute('cy', 140 - (arc * 75)); 
+
+                    let rx = 6, ry = 6;
+                    if (progress < 0.08) {
+                        const squish = progress / 0.08; 
+                        rx = 6 + ((1 - squish) * 1.5); 
+                        ry = 6 - ((1 - squish) * 1.0); 
+                    } else if (progress > 0.92) {
+                        const squish = (1 - progress) / 0.08; 
+                        rx = 6 + ((1 - squish) * 1.5);
+                        ry = 6 - ((1 - squish) * 1.0);
+                    } else {
+                        const stretch = Math.abs(0.5 - progress) * 2; 
+                        rx = 6 - (stretch * 0.5); 
+                        ry = 6 + (stretch * 1.0); 
+                    }
+                    ball.setAttribute('rx', rx);
+                    ball.setAttribute('ry', ry);
+
+                    if (cycle > lastBounceIndex) {
+                        if (cycle > 0) {
+                            const phaseProgress = simulatedTime / 45000; 
+                            const currentIntensity = 0.10 + (phaseProgress * 0.50); 
+                            triggerRipple(false, currentIntensity);
+                        }
+                        lastBounceIndex = cycle;
+                    }
+                } 
+                // ----------------------------------------------------
+                // ANIMATION LOGIC: Flawless Hover Lift-off (45s to 49s)
+                // ----------------------------------------------------
+                else if (simulatedTime < 49000) {
+                    const p = (simulatedTime - 45000) / 4000; 
+                    const ease = 1 - Math.pow(1 - p, 3); // Ease Out Cubic
+                    
+                    ball.setAttribute('cy', 140 - (ease * 110)); 
+                    
+                    // Uses exact squish physics from final floor impact (7.5, 5.0) and springs up to circle (6, 6)
+                    let rx, ry;
+                    if (p < 0.05) { // First 200ms Spring Up
+                        const up = p / 0.05;
+                        rx = 7.5 - (2.5 * up); 
+                        ry = 5.0 + (2.0 * up); 
+                    } else if (p < 0.2) { // Next 600ms Resolve to circle
+                        const settle = (p - 0.05) / 0.15;
+                        rx = 5.0 + (1.0 * settle); 
+                        ry = 7.0 - (1.0 * settle); 
+                    } else {
+                        rx = 6;
+                        ry = 6;
+                    }
+                    ball.setAttribute('rx', rx);
+                    ball.setAttribute('ry', ry);
+                } 
+                // ----------------------------------------------------
+                // ANIMATION LOGIC: Power Slam (49s to 50s)
+                // ----------------------------------------------------
+                else if (simulatedTime < 50000) {
+                    const p = (simulatedTime - 49000) / 1000; 
+                    const ease = Math.pow(p, 4); 
+                    
+                    ball.setAttribute('cy', 30 + (ease * 110)); 
+                    ball.setAttribute('rx', Math.max(6 - (ease * 1.5), 4));  
+                    ball.setAttribute('ry', 6 + (ease * 2.5)); 
+                } 
+                else {
+                    // Zero-Latency Perfect Sync Slam
+                    if (!ballSlammed) {
+                        ball.style.opacity = 0; 
+                        triggerRipple(true); 
+                        ballSlammed = true;
+                    }
+                }
+
+                // ----------------------------------------------------
+                // ANIMATION LOGIC: Diffusion Resolve Fill (50s to 105s)
+                // ----------------------------------------------------
+                if (currentPhase === 'filling' || currentPhase === 'materialize' || currentPhase === 'final-touches') {
+                    const fillProgress = Math.min(Math.max((simulatedTime - fillingStartTimeMs) / (fillingEndTimeMs - fillingStartTimeMs), 0), 1);
+                    const baseTarget = Math.floor(fillProgress * TOTAL_PIXELS);
+
+                    for (let i = 0; i < baseTarget; i++) {
+                        const pIdx = fillOrder[i].index;
+                        if (!pixels[pIdx].classList.contains('active')) activatePixel(pIdx);
+                    }
+
+                    if (currentPhase === 'filling' && Math.random() > 0.6 && baseTarget < TOTAL_PIXELS - 5) {
+                        const randomAhead = baseTarget + Math.floor(Math.random() * 20);
+                        if (randomAhead < TOTAL_PIXELS) {
+                            const pIdx = fillOrder[randomAhead].index;
+                            if (!pixels[pIdx].classList.contains('active')) activatePixel(pIdx);
+                        }
+                    }
+                }
+
+                // ----------------------------------------------------
+                // ANIMATION LOGIC: Deep Sweep Shimmer (105s+)
+                // ----------------------------------------------------
+                if ((currentPhase === 'materialize' || currentPhase === 'final-touches') && !shimmerApplied) {
+                    shimmerApplied = true;
+                    pixels.forEach((p, i) => {
+                        let px = i % 20;
+                        let py = Math.floor(i / 20);
+                        setTimeout(() => {
+                            p.classList.add('materialized');
+                        }, ((px * 80) + (py * 20)) * TIME_MULTIPLIER);
+                    });
+                }
+
+                // ----------------------------------------------------
+                // FINAL STOP LOGIC: "Artwork Ready!"
+                // ----------------------------------------------------
+                if (elapsedMs < realTotalMs) {
+                    requestAnimationFrame(tick);
+                } else {
+                    // Stops the loop and handles the final UI resolution
+                    statusEl.classList.add('fade');
+                    setTimeout(() => {
+                        statusEl.innerText = "Artwork Ready!";
+                        statusEl.classList.remove('fade');
+                        
+                        // Fire the Final Traces & Star Burst
+                        visualContainer.classList.add('artwork-ready');
+                        
+                        // Gracefully terminate the shimmer loop with a left-to-right clearing wave
+                        pixels.forEach((p, i) => {
+                            let px = i % 20;
+                            setTimeout(() => {
+                                p.style.animation = 'none'; // Stop looping
+                                p.style.transition = 'opacity 0.8s ease, filter 0.8s ease';
+                                p.style.opacity = '1'; // Perfectly visible final artwork
+                                p.style.filter = 'brightness(1)';
+                            }, px * 40); // Sweeps across quickly
+                        });
+
+                    }, 400);
+
+                    timeLeftEl.parentElement.innerHTML = "<span style='color: var(--highlight-bright); font-weight: 500; font-size: 0.85rem'>Generation Complete</span>";
+                    progressBarEl.style.width = '100%';
+                }
+            }
+            requestAnimationFrame(tick);
+        }
+
+        window.onload = startRuyiEngine;
+    </script>
+</body>
+</html>
