@@ -6,7 +6,8 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Settings, Eye, EyeOff, X, Check } from 'lucide-react';
+import { createPortal } from 'react-dom';
+import { Settings, X, Check } from 'lucide-react';
 import {
   getStoredConfig,
   saveConfig,
@@ -57,21 +58,16 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   const [provider, setProvider] = useState<LLMProvider>('openai');
 
   // OpenAI fields
-  const [apiKey, setApiKey] = useState('');
   const [model, setModel] = useState('gpt-4o-mini');
   const [temperature, setTemperature] = useState(0.8);
-  const [showApiKey, setShowApiKey] = useState(false);
 
   // Gemini fields
-  const [geminiApiKey, setGeminiApiKey] = useState('');
   const [geminiModel, setGeminiModel] = useState('gemini-2.0-flash');
   const [geminiTemperature, setGeminiTemperature] = useState(0.8);
-  const [showGeminiKey, setShowGeminiKey] = useState(false);
 
   // UI state
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
-  const [isConfiguredStatus, setIsConfiguredStatus] = useState(false);
 
   // Load configs on open
   useEffect(() => {
@@ -80,23 +76,14 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
 
     const openaiConfig = getStoredConfig();
     if (openaiConfig) {
-      setApiKey(openaiConfig.apiKey);
       setModel(openaiConfig.model);
       setTemperature(openaiConfig.temperature);
     }
 
     const geminiConfig = getStoredGeminiConfig();
     if (geminiConfig) {
-      setGeminiApiKey(geminiConfig.apiKey);
       setGeminiModel(geminiConfig.model);
       setGeminiTemperature(geminiConfig.temperature);
-    }
-
-    // Status: configured if active provider has key
-    if (activeProvider === 'gemini') {
-      setIsConfiguredStatus(isGeminiConfigured());
-    } else {
-      setIsConfiguredStatus(isConfigured());
     }
   }, [isOpen]);
 
@@ -104,37 +91,18 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
     setError(null);
     setSuccess(false);
 
-    // Always save OpenAI config
     const openaiConfig: LLMConfig = {
-      apiKey: apiKey.trim(),
       model,
       temperature,
       maxTokens: 2000,
       provider: 'openai',
     };
 
-    // Always save Gemini config
     const geminiConfig: GeminiConfig = {
-      apiKey: geminiApiKey.trim(),
       model: geminiModel,
       temperature: geminiTemperature,
       maxTokens: 4000,
     };
-
-    // Validate the active provider's config
-    if (provider === 'openai') {
-      const validationError = validateConfig(openaiConfig);
-      if (validationError) {
-        setError(validationError);
-        return;
-      }
-    } else {
-      const validationError = validateGeminiConfig(geminiConfig);
-      if (validationError) {
-        setError(validationError);
-        return;
-      }
-    }
 
     try {
       saveConfig(openaiConfig);
@@ -142,7 +110,6 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
       setActiveProvider(provider);
 
       setSuccess(true);
-      setIsConfiguredStatus(true);
 
       if (onProviderChange) {
         onProviderChange(provider);
@@ -166,10 +133,8 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
   };
 
   const activeModels = provider === 'gemini' ? GEMINI_MODELS : OPENAI_MODELS;
-  const activeKey = provider === 'gemini' ? geminiApiKey : apiKey;
   const activeModel = provider === 'gemini' ? geminiModel : model;
   const activeTemp = provider === 'gemini' ? geminiTemperature : temperature;
-  const showKey = provider === 'gemini' ? showGeminiKey : showApiKey;
 
   return (
     <>
@@ -177,20 +142,15 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
       <button
         onClick={() => setIsOpen(true)}
         className={`relative p-1.5 rounded-lg transition-colors hover:bg-white/5 ${triggerClassName}`}
-        style={{ color: isConfiguredStatus ? '#e2e8f0' : '#64748b' }}
+        style={{ color: '#e2e8f0' }}
         title="LLM Settings"
       >
         <Settings size={16} />
-        <span
-          className={`absolute top-1 right-1 w-2 h-2 rounded-full ${
-            isConfiguredStatus ? 'bg-green-500' : 'bg-red-500'
-          }`}
-        />
       </button>
 
       {/* Modal Overlay */}
-      {isOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      {isOpen && createPortal(
+        <div style={{ position: 'fixed', inset: 0, zIndex: 99999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', backgroundColor: 'rgba(0,0,0,0.5)' }}>
           <div className="bg-[#1e1e2e] rounded-lg shadow-2xl w-full max-w-md border border-[#2d2d44]">
             {/* Header */}
             <div className="flex items-center justify-between p-6 border-b border-[#2d2d44]">
@@ -235,56 +195,6 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
                     Gemini
                   </button>
                 </div>
-              </div>
-
-              {/* Status */}
-              <div className="flex items-center gap-2 p-3 rounded bg-[#2d2d44]">
-                <div
-                  className={`w-3 h-3 rounded-full ${
-                    (provider === 'gemini' ? geminiApiKey : apiKey) ? 'bg-green-500' : 'bg-red-500'
-                  }`}
-                />
-                <span className="text-sm text-gray-300">
-                  {provider === 'gemini'
-                    ? (geminiApiKey ? 'Gemini configured' : 'Gemini not configured')
-                    : (apiKey ? 'OpenAI configured' : 'OpenAI not configured')}
-                </span>
-              </div>
-
-              {/* API Key Input */}
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">
-                  {provider === 'gemini' ? 'Gemini API Key' : 'OpenAI API Key'}
-                </label>
-                <div className="relative">
-                  <input
-                    type={showKey ? 'text' : 'password'}
-                    value={activeKey}
-                    onChange={(e) => {
-                      if (provider === 'gemini') {
-                        setGeminiApiKey(e.target.value);
-                      } else {
-                        setApiKey(e.target.value);
-                      }
-                      setSuccess(false);
-                    }}
-                    placeholder={provider === 'gemini' ? 'AIza...' : 'sk-...'}
-                    className="w-full px-3 py-2 bg-[#2d2d44] border border-[#3d3d54] rounded text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 pr-10"
-                  />
-                  <button
-                    onClick={() => {
-                      if (provider === 'gemini') setShowGeminiKey(!showGeminiKey);
-                      else setShowApiKey(!showApiKey);
-                    }}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-200 transition-colors"
-                    type="button"
-                  >
-                    {showKey ? <EyeOff size={18} /> : <Eye size={18} />}
-                  </button>
-                </div>
-                <p className="text-xs text-gray-500 mt-1">
-                  Your key is stored locally and never shared
-                </p>
               </div>
 
               {/* Model Dropdown */}
@@ -371,7 +281,8 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.getElementById('modal-root')!
       )}
     </>
   );

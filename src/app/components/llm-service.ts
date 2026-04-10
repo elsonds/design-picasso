@@ -16,11 +16,12 @@ export interface ChatMessage {
 }
 
 export interface LLMConfig {
-  apiKey: string;
   model: string;
   temperature: number;
   maxTokens: number;
   provider?: LLMProvider;
+  /** @deprecated API keys are now managed server-side via Supabase secrets */
+  apiKey?: string;
 }
 
 const DEFAULT_CONFIG: Partial<LLMConfig> = {
@@ -81,20 +82,16 @@ export function saveConfig(config: LLMConfig): void {
 }
 
 /**
- * Check if API key is configured
+ * Check if LLM is configured (always true — keys are server-side)
  */
 export function isConfigured(): boolean {
-  const config = getStoredConfig();
-  return Boolean(config?.apiKey);
+  return true;
 }
 
 /**
  * Validate LLM configuration
  */
 export function validateConfig(config: Partial<LLMConfig>): string | null {
-  if (!config.apiKey || config.apiKey.trim().length === 0) {
-    return 'API key is required';
-  }
   if (!config.model) {
     return 'Model is required';
   }

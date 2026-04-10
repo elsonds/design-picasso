@@ -8,6 +8,8 @@ import {
   pollServerlessJob,
   buildIndusPrompt,
   buildControlnetPrompt,
+  getStyleDescription,
+  getNegativePrompt,
   getWorkflow,
   KV_WORKFLOW_DEFAULT,
   KV_WORKFLOW_CONTROLNET,
@@ -192,6 +194,7 @@ app.post("/comfyui/generate", async (c) => {
       height = 1328,
       seed,
       style,
+      flow = "icon",   // "icon" | "banner" | "spot"
       reference_image, // base64 data URL or raw base64
       mode,
       lora_name,       // LoRA safetensors filename (null = no LoRA)
@@ -210,10 +213,10 @@ app.post("/comfyui/generate", async (c) => {
     console.log(`\n${"=".repeat(50)}`);
     console.log(`[Picasso] New generation request: '${prompt}'`);
     console.log(
-      `[Picasso] Brand: ${brand}, Dimensions: ${width}x${height}, ControlNet: ${hasReference}, LoRA: ${lora_name || "none (Generic)"}`
+      `[Picasso] Brand: ${brand}, Flow: ${flow}, Dimensions: ${width}x${height}, ControlNet: ${hasReference}, LoRA: ${lora_name || "none (Generic)"}`
     );
 
-    // Step 1: Build the prompt using brand-specific templates
+    // Step 1: Build the prompt (pass-through — frontend handles formatting via LLM)
     const fullPrompt = hasReference
       ? buildControlnetPrompt(prompt, brand)
       : buildIndusPrompt(prompt, brand);
@@ -241,10 +244,32 @@ app.post("/comfyui/generate", async (c) => {
       lora_strength: lora_strength !== undefined ? lora_strength : undefined,
     });
 
+    // Step 2b: Override style description and negative prompt per brand+flow
+    const styleDesc = getStyleDescription(brand, flow);
+    const negPrompt = getNegativePrompt(flow);
+
+    if (workflowType === "default") {
+      // Node 103 (StringConcatenate): string_b = style description
+      if ((workflow as Record<string, any>)["103"]) {
+        (workflow as Record<string, any>)["103"].inputs.string_b = styleDesc;
+        console.log(`[Picasso] Style (103.string_b): ${styleDesc.substring(0, 60)}...`);
+      }
+      // Node 92:7 (CLIP negative): text = negative prompt
+      if ((workflow as Record<string, any>)["92:7"]) {
+        (workflow as Record<string, any>)["92:7"].inputs.text = negPrompt;
+      }
+    } else {
+      // ControlNet workflow: node 7 (negative prompt)
+      if ((workflow as Record<string, any>)["7"]) {
+        (workflow as Record<string, any>)["7"].inputs.text = negPrompt;
+      }
+    }
+
     // Debug: log the final LoRA node state in the workflow
     const loraDebugNode = workflowType === "controlnet" ? "5" : "92:73";
     const loraNodeState = (workflow as Record<string, any>)[loraDebugNode];
     console.log(`[Picasso] Final workflow LoRA node "${loraDebugNode}":`, loraNodeState ? JSON.stringify((loraNodeState as any).inputs) : "NODE REMOVED (Generic)");
+    console.log(`[Picasso] Flow: ${flow}, Brand: ${brand}, Negative prompt length: ${negPrompt.length}`);
 
     // Step 3: Prepare images payload for ControlNet
     let images: Record<string, string> | undefined;

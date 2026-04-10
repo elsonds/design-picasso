@@ -32,34 +32,86 @@ function apiHeaders(): Record<string, string> {
   };
 }
 
-// ─── Prompt Templates ────────────────────────────────────────────────────────
+// ─── Brand + Flow Style Descriptions ────────────────────────────────────────
 // The default workflow uses StringConcatenate (node 103): string_a = subject,
-// string_b = style description (baked into the workflow). So we only need to
-// set string_a with the subject. The LoRA handles the brand-specific style.
+// string_b = style description. The style description and negative prompt
+// vary by brand (Indus, PhonePe, Share.Market, Generic) and flow (icon, banner, spot).
 
-const PROMPT_TEMPLATE = `Generate a highly stylized, 3D isometric vector-style illustration of {subject}.`;
+// ── Style descriptions per brand+flow ──
 
-const CONTROLNET_TEMPLATE = `Flat vector illustration of a {subject}, smooth glossy plastic material, rounded and beveled edges, thick soft outline slightly lighter than fill, vibrant controlled gradients with tinted highlights, soft studio lighting from upper-left, subtle rim light, gentle inner shading for faux depth, short soft drop shadow beneath object, floating centered composition with slight perspective tilt, premium modern UI illustration, ultra-clean surface, no texture grain, no realism, solid black background`;
+const INDUS_ICON_STYLE =
+  "High-end vector icon, smooth glossy plastic material, rounded and beveled edges, thick soft outline slightly lighter than fill, vibrant controlled gradients with tinted highlights, soft studio lighting from upper-left, subtle rim light, gentle inner shading for faux depth, short soft drop shadow beneath object, floating centered composition with slight perspective tilt, premium modern UI illustration, ultra-clean surface, no texture grain, no realism, solid black background";
 
-const NEGATIVE_PROMPT =
-  "nsfw, nude, naked, nudity, porn, pornographic, sexual, explicit, " +
+const PPE_ICON_STYLE =
+  "The artistic execution must strictly adhere to a clean, minimalist, and modern UI/UX icon design aesthetic. The perspective must be an orthographic projection, creating a distinct pseudo-3D volumetric effect without any natural perspective distortion or vanishing points. The visual language is entirely lineless, meaning there are absolutely no outlines, strokes, or sketched borders; every form and volume is defined purely through the precise juxtaposition of solid color blocks. The color palette must be exceptionally vibrant, utilizing flat, opaque colors with a slight pastel or soft undertone, avoiding any use of smooth gradients, blending, or textured brushwork. Shading is achieved through a stark, hard-edged cel-shading technique, dividing the object into clear zones of bright highlight, solid mid-tone, and deep shadow. The shadows should be rendered as crisp, dark, desaturated geometric shapes that ground the forms, while highlights should appear as sharp, flat, bright polygons or stylized four-pointed star glints to suggest a smooth, matte, plastic-like surface finish. The proportions of the object should be chunky, simplified, and playful, featuring heavily rounded corners and exaggerated, thick geometry that abstracts the subject into its most basic, recognizable geometric components. The final image must look like a premium, professionally crafted digital asset, completely smooth and textureless, isolated on a pure white background, perfectly embodying the contemporary, flat-design-evolved-to-3D corporate illustration trend.";
+
+const BANNER_STYLE =
+  "Miniature diorama-style scene with a tiny detailed world, tilt-shift photography feel, soft depth of field, warm ambient lighting, playful composition with related contextual elements surrounding the main subject, isometric or slight bird's-eye perspective, premium 3D render quality, solid black background with vibrant, saturated colors";
+
+const SPOT_STYLE =
+  "Clean object-focused composition, stylized 3D render, soft studio lighting, subtle shadows, floating arrangement with contextual supporting elements, slightly elevated perspective, premium illustration quality, solid black background with vibrant colors";
+
+// ── Negative prompts per flow ──
+
+const ICON_NEGATIVE =
+  "outlines, strokes, line art, sketch, crosshatching, smooth gradients, airbrush, glossy plastic, PBR, photorealistic, realistic texture, noise, grain, dithering, complex background, scenery, ground plane, cast shadow blob, harsh rim light, metallic chrome, glass refraction, text, watermark, logo, multiple unrelated objects, inconsistent perspective, wrong viewing angle, front orthographic only, muddy colors, low resolution, blur, jpeg artifacts";
+
+const BANNER_NEGATIVE =
+  "text, watermark, logo, flat 2D, sketch, line art, outlines, low quality, blurry, distorted, disfigured, bad anatomy, photorealistic, noise, grain, jpeg artifacts, nsfw";
+
+const SPOT_NEGATIVE =
+  "text, watermark, logo, flat 2D, sketch, line art, outlines, complex background, scenery, low quality, blurry, distorted, bad anatomy, photorealistic, noise, grain, jpeg artifacts, nsfw";
+
+const SAFETY_NEGATIVE =
+  ", nsfw, nude, naked, nudity, porn, pornographic, sexual, explicit, " +
   "gore, blood, violence, violent, gruesome, disturbing, horror, scary, " +
   "drugs, weapons, guns, knife, death, dead, corpse, " +
   "racist, sexist, offensive, hate, hateful, discrimination, " +
-  "child abuse, minor, underage, illegal, " +
-  "watermark, signature, text, logo, banner, " +
-  "low quality, blurry, distorted, disfigured, bad anatomy";
+  "child abuse, minor, underage, illegal";
 
+/**
+ * Get the style description for node 103 string_b based on brand+flow.
+ */
+export function getStyleDescription(brand: string, flow: string): string {
+  const b = brand.toLowerCase();
+  const f = flow.toLowerCase();
+
+  if (f === "banner") return BANNER_STYLE;
+  if (f === "spot") return SPOT_STYLE;
+
+  // Icon flow (default)
+  if (b === "indus") return INDUS_ICON_STYLE;
+  if (b === "phonepe" || b === "ppe") return PPE_ICON_STYLE;
+  if (b === "share.market" || b === "sharemarket") return PPE_ICON_STYLE;
+
+  // Generic / fallback — use PPE style (white bg)
+  return PPE_ICON_STYLE;
+}
+
+/**
+ * Get the negative prompt based on flow type.
+ */
+export function getNegativePrompt(flow: string): string {
+  const f = flow.toLowerCase();
+  if (f === "banner") return BANNER_NEGATIVE + SAFETY_NEGATIVE;
+  if (f === "spot") return SPOT_NEGATIVE + SAFETY_NEGATIVE;
+  return ICON_NEGATIVE + SAFETY_NEGATIVE;
+}
+
+/**
+ * Build the prompt (string_a) for the default workflow.
+ * Passes through as-is — frontend handles prompt formatting via LLM.
+ */
 export function buildIndusPrompt(subject: string, _brand?: string): string {
-  return PROMPT_TEMPLATE.replace("{subject}", subject.trim());
+  return subject.trim();
 }
 
+/**
+ * Build the prompt for controlnet workflow.
+ * Passes through as-is — frontend handles prompt formatting via LLM.
+ */
 export function buildControlnetPrompt(subject: string, _brand?: string): string {
-  return CONTROLNET_TEMPLATE.replace("{subject}", subject.trim());
-}
-
-export function getNegativePrompt(): string {
-  return NEGATIVE_PROMPT;
+  return subject.trim();
 }
 
 // ─── Serverless Endpoint Health ──────────────────────────────────────────────

@@ -9,10 +9,11 @@ import { supabaseUrl, supabaseKey } from './supabase-client';
 const LLM_PROXY_URL = `${supabaseUrl}/functions/v1/server/make-server-1a0af268/llm/chat`;
 
 export interface GeminiConfig {
-  apiKey: string;
   model: string;
   temperature: number;
   maxTokens: number;
+  /** @deprecated API keys are now managed server-side via Supabase secrets */
+  apiKey?: string;
 }
 
 const DEFAULT_GEMINI_CONFIG: Partial<GeminiConfig> = {
@@ -45,14 +46,10 @@ export function saveGeminiConfig(config: GeminiConfig): void {
 }
 
 export function isGeminiConfigured(): boolean {
-  const config = getStoredGeminiConfig();
-  return Boolean(config?.apiKey);
+  return true;
 }
 
 export function validateGeminiConfig(config: Partial<GeminiConfig>): string | null {
-  if (!config.apiKey || config.apiKey.trim().length === 0) {
-    return 'Gemini API key is required';
-  }
   if (!config.model) {
     return 'Model is required';
   }

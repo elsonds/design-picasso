@@ -8,8 +8,8 @@ import { generateImage, cancelGeneration } from "./components/api-service";
 import type { StyleKey } from "./components/brand-logos";
 import { AuthProvider, useAuth } from "./components/auth-context";
 import { LoginScreen } from "./components/login-screen";
-import { streamChat, chat, getStoredConfig, saveConfig, isConfigured, getActiveProvider, type LLMConfig, type LLMProvider } from "./components/llm-service";
-import { streamGeminiChat, geminiChat, getStoredGeminiConfig, saveGeminiConfig, isGeminiConfigured } from "./components/gemini-service";
+import { streamChat, chat, getStoredConfig, saveConfig, getActiveProvider, type LLMConfig, type LLMProvider } from "./components/llm-service";
+import { streamGeminiChat, geminiChat, getStoredGeminiConfig, saveGeminiConfig } from "./components/gemini-service";
 import { buildConceptualiseMessages, parseConcepts, type Concept } from "./components/llm-prompts";
 import { SettingsDialog } from "./components/settings-dialog";
 import { getLoraConfig } from "./components/lora-config";
@@ -25,6 +25,11 @@ function MainApp() {
 
 function AuthGate() {
   const { user, loading } = useAuth();
+
+  // Skip auth in local development
+  if (import.meta.env.DEV) {
+    return <AuthenticatedApp />;
+  }
 
   if (loading) {
     return (
@@ -402,15 +407,7 @@ function AuthenticatedApp() {
     const config = llmConfig || getStoredConfig();
     const gConfig = getStoredGeminiConfig();
 
-    const hasKey = currentProvider === 'gemini' ? !!gConfig?.apiKey : !!config?.apiKey;
-    if (!hasKey) {
-      setMessages((prev) => [...prev, {
-        id: `msg-${Date.now()}`, type: "bot",
-        content: `Please configure your ${currentProvider === 'gemini' ? 'Gemini' : 'OpenAI'} API key first. Click the settings icon to add it.`,
-        style: selectedBrand as StyleKey, timestamp: new Date(),
-      }]);
-      return;
-    }
+    // API keys are managed server-side via Supabase secrets
 
     // ─── If we have a pending clarification, combine it with the new answer ─
     let conceptualiseInput = currentPrompt;
@@ -445,10 +442,10 @@ function AuthenticatedApp() {
             );
           };
 
-          if (currentProvider === 'gemini' && gConfig?.apiKey) {
-            await streamGeminiChat(clarifyMessages, gConfig, onClarifyChunk);
-          } else if (config?.apiKey) {
-            await streamChat(clarifyMessages, config, onClarifyChunk);
+          if (currentProvider === 'gemini') {
+            await streamGeminiChat(clarifyMessages, gConfig || { model: 'gemini-2.0-flash', temperature: 0.8, maxTokens: 4000 }, onClarifyChunk);
+          } else {
+            await streamChat(clarifyMessages, config || { model: 'gpt-4o-mini', temperature: 0.8, maxTokens: 2000 }, onClarifyChunk);
           }
         } catch {
           // If clarification fails, just proceed to conceptualise
@@ -481,10 +478,10 @@ function AuthenticatedApp() {
       };
 
       let fullResponse: string;
-      if (currentProvider === 'gemini' && gConfig?.apiKey) {
-        fullResponse = await streamGeminiChat(llmMessages, gConfig, onConceptChunk);
+      if (currentProvider === 'gemini') {
+        fullResponse = await streamGeminiChat(llmMessages, gConfig || { model: 'gemini-2.0-flash', temperature: 0.8, maxTokens: 4000 }, onConceptChunk);
       } else {
-        fullResponse = await streamChat(llmMessages, config!, onConceptChunk);
+        fullResponse = await streamChat(llmMessages, config || { model: 'gpt-4o-mini', temperature: 0.8, maxTokens: 2000 }, onConceptChunk);
       }
 
       const concepts = parseConcepts(fullResponse);
@@ -622,12 +619,6 @@ function AuthenticatedApp() {
           />
         </div>
 
-        {/* LLM status */}
-        {!(llmProvider === 'gemini' ? isGeminiConfigured() : isConfigured()) && (
-          <p className="text-slate-700 text-[11px] mt-6 relative z-10">
-            Add your {llmProvider === 'gemini' ? 'Gemini' : 'OpenAI'} API key in settings to enable Ideate & Conceptualise
-          </p>
-        )}
 
         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
       </div>
