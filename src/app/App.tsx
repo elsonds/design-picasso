@@ -11,7 +11,6 @@ import { LoginScreen } from "./components/login-screen";
 import { streamChat, chat, getStoredConfig, saveConfig, getActiveProvider, type LLMConfig, type LLMProvider } from "./components/llm-service";
 import { streamGeminiChat, geminiChat, getStoredGeminiConfig, saveGeminiConfig } from "./components/gemini-service";
 import { buildConceptualiseMessages, parseConcepts, type Concept } from "./components/llm-prompts";
-import { SettingsDialog } from "./components/settings-dialog";
 import { getLoraConfig } from "./components/lora-config";
 import { getRestructureSkill } from "./components/prompt-skills";
 
@@ -564,10 +563,6 @@ function AuthenticatedApp() {
           `}</style>
         </div>
 
-        {/* Settings icon — top right */}
-        <div className="absolute top-4 right-4 z-10">
-          <SettingsDialog onConfigChange={setLlmConfig} onProviderChange={setLlmProvider} />
-        </div>
 
         {/* Title — large with gradient outline, overlapping with prompt bar */}
         <div className="relative z-10 leading-none mb-[-40px] select-none">
@@ -646,7 +641,6 @@ function AuthenticatedApp() {
             onGenerateFromConcept={handleGenerateFromConcept}
             onCancelGeneration={handleCancelGeneration}
             selectedRatio={selectedRatio}
-            settingsSlot={<SettingsDialog onConfigChange={setLlmConfig} onProviderChange={setLlmProvider} />}
             onToggleGallery={() => setGridPanelOpen((prev) => !prev)}
             isGalleryOpen={gridPanelOpen}
           />
