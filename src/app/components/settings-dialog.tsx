@@ -282,7 +282,7 @@ export const SettingsDialog: React.FC<SettingsDialogProps> = ({
             </div>
           </div>
         </div>,
-        document.getElementById('modal-root')!
+        document.getElementById('modal-root') || document.body
       )}
     </>
   );
