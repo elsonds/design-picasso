@@ -596,8 +596,8 @@ function AuthenticatedApp() {
         </div>
 
 
-        {/* Execution mode — top right */}
-        <div className="absolute top-4 right-4 z-20">
+        {/* Execution mode — top left */}
+        <div className="absolute top-4 left-4 z-20">
           <ExecutionModeDropdown
             executionMode={executionMode}
             onExecutionModeChange={handleExecutionModeChange}
@@ -671,8 +671,8 @@ function AuthenticatedApp() {
     >
       {/* Main chat area */}
       <div className="flex-1 min-w-0 flex flex-col relative">
-        {/* Execution mode — top right */}
-        <div className="absolute top-3 right-3 z-20">
+        {/* Execution mode — top left */}
+        <div className="absolute top-3 left-3 z-20">
           <ExecutionModeDropdown
             executionMode={executionMode}
             onExecutionModeChange={handleExecutionModeChange}

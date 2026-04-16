@@ -61,7 +61,7 @@ export function ExecutionModeDropdown({
 
       {open && (
         <div
-          className="absolute top-full right-0 mt-2 rounded-xl border py-1 min-w-[200px] z-50"
+          className="absolute top-full left-0 mt-2 rounded-xl border py-1 min-w-[200px] z-50"
           style={{
             backgroundColor: '#1a1f2e',
             borderColor: 'rgba(148,163,184,0.1)',
