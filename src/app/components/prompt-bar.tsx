@@ -7,8 +7,12 @@ import {
   X,
   ArrowUp,
   Lock,
+  Cpu,
+  Zap,
+  Square,
 } from 'lucide-react';
 import { STYLE_CONFIG, type StyleKey, IndusLogo, PhonePeLogo, ShareMarketLogo, GenericLogo } from './brand-logos';
+import type { ExecutionMode } from './types';
 
 export type FlowType = 'icon' | 'spot' | 'banner';
 
@@ -26,6 +30,11 @@ interface PromptBarProps {
   // Flow (icon / spot / banner)
   selectedFlow: FlowType;
   onFlowChange: (flow: FlowType) => void;
+  // Execution mode
+  executionMode: ExecutionMode;
+  onExecutionModeChange: (mode: ExecutionMode) => void;
+  podStatus?: string;
+  onPodStop?: () => void;
   // Image reference (selected from grid)
   referencedImage: { url: string; label: string } | null;
   onClearReference: () => void;
@@ -67,6 +76,10 @@ export function PromptBar({
   onPhaseChange,
   selectedFlow,
   onFlowChange,
+  executionMode,
+  onExecutionModeChange,
+  podStatus,
+  onPodStop,
   referencedImage,
   onClearReference,
   attachedImage,
@@ -78,6 +91,8 @@ export function PromptBar({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [phaseDropdownOpen, setPhaseDropdownOpen] = useState(false);
   const phaseDropdownRef = useRef<HTMLDivElement>(null);
+  const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
+  const modeDropdownRef = useRef<HTMLDivElement>(null);
 
   // Theme no longer used for UI colors — everything is neutral
 
@@ -105,6 +120,9 @@ export function PromptBar({
     function handleClickOutside(event: MouseEvent) {
       if (phaseDropdownRef.current && !phaseDropdownRef.current.contains(event.target as Node)) {
         setPhaseDropdownOpen(false);
+      }
+      if (modeDropdownRef.current && !modeDropdownRef.current.contains(event.target as Node)) {
+        setModeDropdownOpen(false);
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
@@ -244,8 +262,78 @@ export function PromptBar({
             })}
           </div>
 
-          {/* Right — phase dropdown, attach, send */}
+          {/* Right — mode dropdown, phase dropdown, attach, send */}
           <div className="flex items-center gap-1">
+            {/* Execution mode dropdown */}
+            <div ref={modeDropdownRef} className="relative">
+              <button
+                onClick={() => setModeDropdownOpen(!modeDropdownOpen)}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[13px] font-medium transition-colors hover:bg-white/5"
+                style={{
+                  color: executionMode === 'pod' ? '#22d3ee' : '#64748b',
+                  backgroundColor: executionMode === 'pod' ? 'rgba(34,211,238,0.08)' : 'transparent',
+                  border: executionMode === 'pod' ? '1px solid rgba(34,211,238,0.2)' : '1px solid transparent',
+                }}
+              >
+                {executionMode === 'pod' ? <Cpu size={12} /> : <Zap size={12} />}
+                {executionMode === 'pod' ? 'Pod' : 'Serverless'}
+                <ChevronDown size={10} style={{ opacity: 0.5 }} />
+              </button>
+
+              {modeDropdownOpen && (
+                <div
+                  className="absolute bottom-full right-0 mb-2 rounded-xl border py-1 min-w-[180px] z-50"
+                  style={{
+                    backgroundColor: '#1a1f2e',
+                    borderColor: 'rgba(148,163,184,0.1)',
+                    backdropFilter: 'blur(20px)',
+                  }}
+                >
+                  <button
+                    onClick={() => { onExecutionModeChange('serverless'); setModeDropdownOpen(false); }}
+                    className={`w-full px-3 py-2 text-left text-xs transition-colors flex items-center gap-2 ${
+                      executionMode === 'serverless'
+                        ? 'text-slate-200 bg-white/5'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                    }`}
+                  >
+                    <Zap size={12} />
+                    <div>
+                      <span>Serverless</span>
+                      <span className="block text-[10px] opacity-50 mt-0.5">Auto-scale, pay per request</span>
+                    </div>
+                  </button>
+                  <div className="h-px bg-white/5 my-1" />
+                  <button
+                    onClick={() => { onExecutionModeChange('pod'); setModeDropdownOpen(false); }}
+                    className={`w-full px-3 py-2 text-left text-xs transition-colors flex items-center gap-2 ${
+                      executionMode === 'pod'
+                        ? 'text-cyan-300 bg-cyan-500/5'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                    }`}
+                  >
+                    <Cpu size={12} />
+                    <div>
+                      <span>Pod</span>
+                      <span className="block text-[10px] opacity-50 mt-0.5">Persistent GPU, auto-detects running pods</span>
+                    </div>
+                  </button>
+                  {executionMode === 'pod' && podStatus === 'ready' && onPodStop && (
+                    <>
+                      <div className="h-px bg-white/5 my-1" />
+                      <button
+                        onClick={() => { onPodStop(); setModeDropdownOpen(false); }}
+                        className="w-full px-3 py-2 text-left text-xs text-red-400 hover:text-red-300 hover:bg-red-500/5 transition-colors flex items-center gap-2"
+                      >
+                        <Square size={10} />
+                        <span>Stop Pod</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Phase dropdown */}
             <div ref={phaseDropdownRef} className="relative">
               <button

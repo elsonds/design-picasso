@@ -4,7 +4,8 @@ import { ASPECT_RATIOS } from "./components/types";
 import { ChatPanel } from "./components/chat-panel";
 import { PromptBar } from "./components/prompt-bar";
 import { ImageGridPanel, type GeneratedImage } from "./components/image-grid-panel";
-import { generateImage, cancelGeneration } from "./components/api-service";
+import { generateImage, cancelGeneration, getExecutionMode, setExecutionMode, podStop, fetchStatus } from "./components/api-service";
+import type { ExecutionMode } from "./components/types";
 import type { StyleKey } from "./components/brand-logos";
 import { AuthProvider, useAuth } from "./components/auth-context";
 import { LoginScreen } from "./components/login-screen";
@@ -61,6 +62,36 @@ function AuthenticatedApp() {
   const [selectedBrand, setSelectedBrand] = useState<string>("Indus");
   const [selectedPhase, setSelectedPhase] = useState<"conceptualise" | "generate" | null>(null);
   const [selectedFlow, setSelectedFlow] = useState<"icon" | "banner" | "spot">("icon");
+
+  // Execution mode
+  const [executionMode, setExecutionModeState] = useState<ExecutionMode>("serverless");
+  const [podStatusLabel, setPodStatusLabel] = useState<string>("unknown");
+
+  // Load execution mode on mount
+  useEffect(() => {
+    getExecutionMode().then(setExecutionModeState);
+  }, []);
+
+  // Poll status for pod mode indicator
+  useEffect(() => {
+    const poll = async () => {
+      const status = await fetchStatus();
+      setPodStatusLabel(status.pod_status);
+    };
+    poll();
+    const interval = setInterval(poll, 15000);
+    return () => clearInterval(interval);
+  }, [executionMode]);
+
+  const handleExecutionModeChange = useCallback(async (mode: ExecutionMode) => {
+    setExecutionModeState(mode);
+    await setExecutionMode(mode);
+  }, []);
+
+  const handlePodStop = useCallback(async () => {
+    await podStop();
+    setPodStatusLabel("stopped");
+  }, []);
 
   // Derive ratio from flow
   const FLOW_RATIOS: Record<string, string> = { icon: "1:1", banner: "16:9", spot: "1:1" };
@@ -604,6 +635,10 @@ function AuthenticatedApp() {
             onPhaseChange={(p) => setSelectedPhase(p)}
             selectedFlow={selectedFlow}
             onFlowChange={setSelectedFlow}
+            executionMode={executionMode}
+            onExecutionModeChange={handleExecutionModeChange}
+            podStatus={podStatusLabel}
+            onPodStop={handlePodStop}
             referencedImage={referencedImage}
             onClearReference={handleClearReference}
             attachedImage={attachedImage}
@@ -658,6 +693,10 @@ function AuthenticatedApp() {
           onPhaseChange={(p) => setSelectedPhase(p)}
           selectedFlow={selectedFlow}
           onFlowChange={setSelectedFlow}
+          executionMode={executionMode}
+          onExecutionModeChange={handleExecutionModeChange}
+          podStatus={podStatusLabel}
+          onPodStop={handlePodStop}
           referencedImage={referencedImage}
           onClearReference={handleClearReference}
           attachedImage={attachedImage}

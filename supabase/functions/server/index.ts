@@ -15,6 +15,19 @@ import {
   KV_WORKFLOW_CONTROLNET,
   KV_WORKFLOW_CONFIG,
 } from "./runpod.ts";
+import {
+  getExecutionMode,
+  setExecutionMode,
+  ensurePodRunning,
+  startOrCreatePod,
+  stopPod,
+  checkIdleAutoStop,
+  probeComfyUI,
+  uploadImage,
+  queuePrompt,
+  pollHistory,
+  type ExecutionMode,
+} from "./pod.ts";
 
 const app = new Hono().basePath("/server/make-server-1a0af268");
 
@@ -37,12 +50,74 @@ app.get("/health", (c) => {
   return c.json({ status: "ok" });
 });
 
-// ─── Serverless Endpoint Status ──────────────────────────────────────────────
-// Replaces the old pod-lifecycle status check. Queries the RunPod Serverless
-// /health endpoint to report worker availability and queue depth.
+// ─── Execution Mode ─────────────────────────────────────────────────────────
+
+app.get("/comfyui/mode", async (c) => {
+  const mode = await getExecutionMode();
+  return c.json({ mode });
+});
+
+app.post("/comfyui/mode", async (c) => {
+  try {
+    const body = await c.req.json();
+    const mode = body.mode as ExecutionMode;
+    if (mode !== "serverless" && mode !== "pod") {
+      return c.json({ error: "mode must be 'serverless' or 'pod'" }, 400);
+    }
+    await setExecutionMode(mode);
+    return c.json({ success: true, mode });
+  } catch (err: unknown) {
+    return c.json({ error: (err as Error).message }, 500);
+  }
+});
+
+// ─── Pod Control ────────────────────────────────────────────────────────────
+
+app.post("/comfyui/pod/start", async (c) => {
+  try {
+    const result = await startOrCreatePod();
+    return c.json({
+      success: !("error" === result.status),
+      ...result,
+    });
+  } catch (err: unknown) {
+    return c.json({ success: false, error: (err as Error).message }, 500);
+  }
+});
+
+app.post("/comfyui/pod/stop", async (c) => {
+  try {
+    await stopPod();
+    return c.json({ success: true, message: "Pod stop requested" });
+  } catch (err: unknown) {
+    return c.json({ success: false, error: (err as Error).message }, 500);
+  }
+});
+
+// ─── Endpoint Status (mode-aware) ───────────────────────────────────────────
 
 app.get("/comfyui/status", async (c) => {
   try {
+    const mode = await getExecutionMode();
+
+    if (mode === "pod") {
+      // Pod mode: check pod status + idle auto-stop
+      await checkIdleAutoStop();
+      const podStatus = await ensurePodRunning();
+
+      return c.json({
+        connected: true,
+        pod_status: podStatus.status,
+        message: podStatus.message,
+        execution_mode: "pod",
+        pod_id: podStatus.podId,
+        gpu: podStatus.gpu,
+        uptime: podStatus.uptime,
+        cost_per_hr: podStatus.costPerHr,
+      });
+    }
+
+    // Serverless mode (default)
     const health = await getEndpointHealth();
 
     if (!health) {
@@ -50,6 +125,7 @@ app.get("/comfyui/status", async (c) => {
         connected: false,
         pod_status: "unknown",
         message: "Cannot reach RunPod Serverless endpoint",
+        execution_mode: "serverless",
       });
     }
 
@@ -67,7 +143,7 @@ app.get("/comfyui/status", async (c) => {
       podStatus = "starting";
       message = `Worker initializing (${health.workers.initializing} spinning up)`;
     } else if (isColdStart) {
-      podStatus = "ready"; // Serverless auto-starts on request — report as ready
+      podStatus = "ready";
       message = "Serverless standby — will cold-start on first request (~30-60s)";
     } else {
       podStatus = "ready";
@@ -78,6 +154,7 @@ app.get("/comfyui/status", async (c) => {
       connected: true,
       pod_status: podStatus,
       message,
+      execution_mode: "serverless",
       workers: health.workers,
       jobs: health.jobs,
     });
@@ -87,6 +164,7 @@ app.get("/comfyui/status", async (c) => {
       connected: false,
       pod_status: "unknown",
       message: `Error: ${(err as Error).message?.substring(0, 100)}`,
+      execution_mode: "serverless",
     });
   }
 });
@@ -175,15 +253,7 @@ app.get("/comfyui/workflow", async (c) => {
   }
 });
 
-// ─── Generate Image (SERVERLESS — replaces old pod-based generation) ─────────
-// Instead of finding/creating a pod, health-checking ComfyUI, and submitting
-// the workflow to a pod's ComfyUI /prompt endpoint, we now:
-//   1. Build the prompt using Indus templates
-//   2. Build workflow with parameters applied
-//   3. Prepare images payload for ControlNet
-//   4. Submit to RunPod Serverless
-//   5. Store job metadata in KV for the status polling route
-//   6. Return the job_id for frontend polling
+// ─── Generate Image (mode-aware: serverless or pod) ─────────────────────────
 
 app.post("/comfyui/generate", async (c) => {
   try {
@@ -205,33 +275,26 @@ app.post("/comfyui/generate", async (c) => {
       return c.json({ success: false, error: "prompt is required" }, 400);
     }
 
+    const executionMode = await getExecutionMode();
     const hasReference = !!(reference_image && mode === "controlnet");
-
-    // Determine brand from style parameter (frontend sends brand name as style)
     const brand = style || "Indus";
 
     console.log(`\n${"=".repeat(50)}`);
-    console.log(`[Picasso] New generation request: '${prompt}'`);
+    console.log(`[Picasso] New generation: '${prompt}' [${executionMode}]`);
     console.log(
-      `[Picasso] Brand: ${brand}, Flow: ${flow}, Dimensions: ${width}x${height}, ControlNet: ${hasReference}, LoRA: ${lora_name || "none (Generic)"}`
+      `[Picasso] Brand: ${brand}, Flow: ${flow}, ${width}x${height}, ControlNet: ${hasReference}, LoRA: ${lora_name || "none"}`
     );
 
-    // Step 1: Build the prompt (pass-through — frontend handles formatting via LLM)
+    // Build prompt (pass-through)
     const fullPrompt = hasReference
       ? buildControlnetPrompt(prompt, brand)
       : buildIndusPrompt(prompt, brand);
 
-    console.log(`[Picasso] Prompt: ${fullPrompt.substring(0, 80)}...`);
-
     const actualSeed =
       seed ?? Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
-    console.log(`[Picasso] Seed: ${actualSeed}`);
 
-    // Step 2: Build workflow with parameters applied
+    // Build workflow (shared by both modes)
     const workflowType = hasReference ? "controlnet" : "default";
-
-    // For ControlNet, the reference image is passed to the serverless worker
-    // via the `images` field. The worker writes it to ComfyUI's input folder.
     const imageFilename = hasReference ? `ref_${Date.now()}.png` : undefined;
 
     const workflow = await getWorkflow(workflowType, {
@@ -244,50 +307,96 @@ app.post("/comfyui/generate", async (c) => {
       lora_strength: lora_strength !== undefined ? lora_strength : undefined,
     });
 
-    // Step 2b: Override style description and negative prompt per brand+flow
+    // Override style description and negative prompt per brand+flow
     const styleDesc = getStyleDescription(brand, flow);
     const negPrompt = getNegativePrompt(flow);
 
     if (workflowType === "default") {
-      // Node 103 (StringConcatenate): string_b = style description
       if ((workflow as Record<string, any>)["103"]) {
         (workflow as Record<string, any>)["103"].inputs.string_b = styleDesc;
-        console.log(`[Picasso] Style (103.string_b): ${styleDesc.substring(0, 60)}...`);
       }
-      // Node 92:7 (CLIP negative): text = negative prompt
       if ((workflow as Record<string, any>)["92:7"]) {
         (workflow as Record<string, any>)["92:7"].inputs.text = negPrompt;
       }
     } else {
-      // ControlNet workflow: node 7 (negative prompt)
       if ((workflow as Record<string, any>)["7"]) {
         (workflow as Record<string, any>)["7"].inputs.text = negPrompt;
       }
     }
 
-    // Debug: log the final LoRA node state in the workflow
+    // Debug logging
     const loraDebugNode = workflowType === "controlnet" ? "5" : "92:73";
     const loraNodeState = (workflow as Record<string, any>)[loraDebugNode];
-    console.log(`[Picasso] Final workflow LoRA node "${loraDebugNode}":`, loraNodeState ? JSON.stringify((loraNodeState as any).inputs) : "NODE REMOVED (Generic)");
-    console.log(`[Picasso] Flow: ${flow}, Brand: ${brand}, Negative prompt length: ${negPrompt.length}`);
+    console.log(`[Picasso] LoRA "${loraDebugNode}":`, loraNodeState ? JSON.stringify((loraNodeState as any).inputs) : "REMOVED");
 
-    // Step 3: Prepare images payload for ControlNet
-    let images: Record<string, string> | undefined;
-    if (hasReference && imageFilename) {
-      // Strip data URL prefix if present
-      let b64Data = reference_image;
-      if (b64Data.includes(",")) {
-        b64Data = b64Data.split(",")[1];
+    // ── POD MODE ──
+    if (executionMode === "pod") {
+      // Auto-start pod if needed
+      const podStatus = await startOrCreatePod();
+      if (!podStatus.podId) {
+        return c.json({
+          success: false,
+          error: podStatus.message || "Failed to start pod",
+          pod_status: podStatus.status,
+        }, 503);
       }
-      images = { [imageFilename]: b64Data };
-      console.log(`[Picasso] Reference image included as: ${imageFilename}`);
+
+      if (!podStatus.ready) {
+        // Pod starting — tell frontend to retry
+        return c.json({
+          success: false,
+          error: "Pod starting, please wait...",
+          pod_status: podStatus.status,
+          pod_id: podStatus.podId,
+          retry: true,
+        }, 503);
+      }
+
+      // Pod is ready — upload reference image if ControlNet
+      let podImageFilename = imageFilename;
+      if (hasReference && reference_image && podStatus.podId) {
+        podImageFilename = await uploadImage(podStatus.podId, reference_image);
+        // Update workflow with actual filename from ComfyUI
+        if ((workflow as Record<string, any>)["28"]) {
+          (workflow as Record<string, any>)["28"].inputs.image = podImageFilename;
+        }
+      }
+
+      // Queue workflow to ComfyUI
+      const promptId = await queuePrompt(podStatus.podId, workflow);
+
+      // Store job metadata
+      await kv.set(`indus_pod_job_${promptId}`, {
+        prompt: fullPrompt,
+        width,
+        height,
+        seed: actualSeed,
+        style: style || "Indus",
+        mode: hasReference ? "ControlNet" : "Prompt",
+        pod_id: podStatus.podId,
+        submitted_at: Date.now(),
+      });
+
+      return c.json({
+        success: true,
+        job_id: promptId,
+        request_id: promptId,
+        seed: actualSeed,
+        execution_mode: "pod",
+        message: "Generation submitted to pod",
+      });
     }
 
-    // Step 4: Submit to RunPod Serverless
-    console.log(`[Picasso] Submitting workflow to RunPod Serverless...`);
+    // ── SERVERLESS MODE (default) ──
+    let images: Record<string, string> | undefined;
+    if (hasReference && imageFilename) {
+      let b64Data = reference_image;
+      if (b64Data.includes(",")) b64Data = b64Data.split(",")[1];
+      images = { [imageFilename]: b64Data };
+    }
+
     const job = await submitServerlessJob(workflow, images);
 
-    // Step 5: Store job metadata in KV for the status polling route
     await kv.set(`indus_job_${job.id}`, {
       prompt: fullPrompt,
       width,
@@ -303,6 +412,7 @@ app.post("/comfyui/generate", async (c) => {
       job_id: job.id,
       request_id: job.id,
       seed: actualSeed,
+      execution_mode: "serverless",
       message: "Generation submitted to serverless endpoint",
     });
   } catch (err: unknown) {
@@ -314,16 +424,59 @@ app.post("/comfyui/generate", async (c) => {
   }
 });
 
-// ─── Check generation job status (SERVERLESS — replaces ComfyUI /history) ────
-// Instead of querying a pod's ComfyUI /history endpoint, we now poll the
-// RunPod Serverless /status/{job_id} endpoint. When the job completes, the
-// serverless worker returns the image as base64 in its output.
+// ─── Check generation job status (mode-aware) ──────────────────────────────
 
 app.get("/comfyui/status/:jobId", async (c) => {
   try {
     const jobId = c.req.param("jobId");
 
-    // Get job metadata from KV
+    // Check if this is a pod job first
+    let podJobMeta: Record<string, unknown> | null = null;
+    try {
+      const saved = await kv.get(`indus_pod_job_${jobId}`);
+      if (saved && typeof saved === "object") podJobMeta = saved as Record<string, unknown>;
+    } catch { /* ignore */ }
+
+    // ── POD JOB ──
+    if (podJobMeta) {
+      const podId = podJobMeta.pod_id as string;
+      if (!podId) {
+        return c.json({ status: "FAILED", error: "Pod ID missing from job metadata" });
+      }
+
+      const result = await pollHistory(podId, jobId);
+
+      if (result.status === "COMPLETED" && result.image) {
+        const elapsed = podJobMeta.submitted_at
+          ? Math.round((Date.now() - (podJobMeta.submitted_at as number)) / 1000)
+          : 0;
+
+        console.log(`[Pod] Job ${jobId} completed in ${elapsed}s`);
+        try { await kv.del(`indus_pod_job_${jobId}`); } catch { /* ignore */ }
+
+        return c.json({
+          status: "COMPLETED",
+          completed: true,
+          success: true,
+          image: result.image,
+          seed: (podJobMeta.seed as number) ?? 0,
+          width: (podJobMeta.width as number) ?? 1328,
+          height: (podJobMeta.height as number) ?? 1328,
+          mode: (podJobMeta.mode as string) || "Prompt",
+          style: (podJobMeta.style as string) || "Indus",
+          execution_time: elapsed,
+        });
+      }
+
+      if (result.status === "FAILED") {
+        try { await kv.del(`indus_pod_job_${jobId}`); } catch { /* ignore */ }
+        return c.json({ status: "FAILED", error: result.error || "Generation failed" });
+      }
+
+      return c.json({ status: "IN_PROGRESS", completed: false });
+    }
+
+    // ── SERVERLESS JOB (default) ──
     let jobMeta: Record<string, unknown> = {};
     try {
       const saved = await kv.get(`indus_job_${jobId}`);

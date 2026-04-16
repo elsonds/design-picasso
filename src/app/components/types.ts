@@ -14,18 +14,24 @@ export interface ChatMessage {
   timestamp: Date;
 }
 
-// Serverless statuses — simplified from the old pod lifecycle statuses.
-// "ready" = endpoint reachable (workers may cold-start on first request)
-// "starting" = workers are initializing
-// "unknown" = can't reach endpoint
-export type PodStatus = "ready" | "starting" | "unknown";
+export type ExecutionMode = "serverless" | "pod";
+
+// Statuses for both serverless and pod modes
+export type PodStatus = "ready" | "starting" | "creating" | "comfyui_loading" | "stopped" | "none" | "unknown" | "error";
 
 export interface StatusInfo {
   connected: boolean;
   pod_status: PodStatus;
   message: string;
+  execution_mode?: ExecutionMode;
+  // Serverless-specific
   workers?: { idle: number; running: number; initializing: number; total: number };
   jobs?: { completed: number; failed: number; inProgress: number; inQueue: number; retried: number };
+  // Pod-specific
+  pod_id?: string;
+  gpu?: string;
+  uptime?: number;
+  cost_per_hr?: number;
 }
 
 export const ASPECT_RATIOS: Record<string, { width: number; height: number }> = {

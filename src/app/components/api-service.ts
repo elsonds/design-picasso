@@ -1,4 +1,4 @@
-import type { StatusInfo, PodStatus } from "./types";
+import type { StatusInfo, PodStatus, ExecutionMode } from "./types";
 import { supabaseUrl, supabaseKey } from "./supabase-client";
 
 // ─── Supabase Edge Function Base URL ────────────────────────────────────────
@@ -76,9 +76,14 @@ export async function fetchStatus(): Promise<StatusInfo> {
     cachedStatus = {
       connected: health.connected ?? true,
       pod_status: (health.pod_status as PodStatus) ?? "ready",
-      message: health.message ?? "Serverless Ready",
+      message: health.message ?? "Ready",
+      execution_mode: health.execution_mode ?? "serverless",
       workers: health.workers,
       jobs: health.jobs,
+      pod_id: health.pod_id,
+      gpu: health.gpu,
+      uptime: health.uptime,
+      cost_per_hr: health.cost_per_hr,
     };
     return { ...cachedStatus };
   } catch (err: unknown) {
@@ -88,6 +93,63 @@ export async function fetchStatus(): Promise<StatusInfo> {
       message: `Error: ${(err as Error).message?.substring(0, 60) || "Unknown"}`,
     };
     return { ...cachedStatus };
+  }
+}
+
+// ─── Execution Mode ─────────────────────────────────────────────────────────
+
+export async function getExecutionMode(): Promise<ExecutionMode> {
+  try {
+    const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/mode`, {
+      headers: supabaseHeaders(),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return "serverless";
+    const data = await res.json();
+    return data.mode === "pod" ? "pod" : "serverless";
+  } catch {
+    return "serverless";
+  }
+}
+
+export async function setExecutionMode(mode: ExecutionMode): Promise<boolean> {
+  try {
+    const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/mode`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      body: JSON.stringify({ mode }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+// ─── Pod Control ────────────────────────────────────────────────────────────
+
+export async function podStart(): Promise<{ success: boolean; message?: string }> {
+  try {
+    const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/pod/start`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      signal: AbortSignal.timeout(30000),
+    });
+    return await res.json();
+  } catch (err) {
+    return { success: false, message: (err as Error).message };
+  }
+}
+
+export async function podStop(): Promise<{ success: boolean; message?: string }> {
+  try {
+    const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/pod/stop`, {
+      method: "POST",
+      headers: supabaseHeaders(),
+      signal: AbortSignal.timeout(15000),
+    });
+    return await res.json();
+  } catch (err) {
+    return { success: false, message: (err as Error).message };
   }
 }
 
@@ -253,9 +315,61 @@ export async function generateImage(
       signal,
     });
 
+    // Handle pod mode: 503 means pod is starting — retry
+    if (submitRes.status === 503) {
+      const retryData = await submitRes.json().catch(() => ({}));
+      if (retryData.retry) {
+        console.log(`[Picasso] Pod starting — waiting for it to be ready...`);
+        onPhase?.("Starting GPU pod...", 10);
+
+        // Poll until pod is ready, then resubmit
+        for (let retryAttempt = 0; retryAttempt < 60; retryAttempt++) {
+          await new Promise((r) => setTimeout(r, 5000));
+          if (signal.aborted) throw new Error("Generation cancelled");
+
+          const elapsed = retryAttempt * 5;
+          if (elapsed < 30) onPhase?.("Starting GPU pod...", 12);
+          else if (elapsed < 60) onPhase?.("Pod booting, loading ComfyUI...", 18);
+          else if (elapsed < 120) onPhase?.("Loading models...", 22);
+          else onPhase?.("Almost ready...", 25);
+
+          // Retry the generate request
+          const retryRes = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/generate`, {
+            method: "POST",
+            headers: supabaseHeaders(),
+            body: JSON.stringify({
+              prompt: req.prompt, width, height, seed,
+              style: req.style, flow: req.flow,
+              mode: hasReference ? "controlnet" : undefined,
+              reference_image: hasReference ? referenceImageData : undefined,
+              lora_name: loraName, lora_strength: loraStrength,
+            }),
+            signal,
+          });
+
+          if (retryRes.status === 503) continue; // Still starting
+
+          if (retryRes.ok) {
+            const retrySubmitData = await retryRes.json();
+            const retryJobId = retrySubmitData.job_id || retrySubmitData.id;
+            if (retryJobId) {
+              currentJobId = retryJobId;
+              console.log(`[Picasso] Job submitted after pod ready: ${retryJobId}`);
+              onPhase?.("Generation queued...", 30);
+              return await pollRunPodJob(retryJobId, req, seed, signal, onPhase);
+            }
+          }
+
+          const errText = await retryRes.text().catch(() => "");
+          throw new Error(`Generation failed after pod start: ${errText.substring(0, 200)}`);
+        }
+        throw new Error("Pod startup timed out after 5 minutes");
+      }
+    }
+
     if (!submitRes.ok) {
       const text = await submitRes.text().catch(() => "");
-      throw new Error(`RunPod submit failed (${submitRes.status}): ${text.substring(0, 200)}`);
+      throw new Error(`Submit failed (${submitRes.status}): ${text.substring(0, 200)}`);
     }
 
     const submitData = await submitRes.json();
