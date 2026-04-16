@@ -6,6 +6,7 @@ import { PromptBar } from "./components/prompt-bar";
 import { ImageGridPanel, type GeneratedImage } from "./components/image-grid-panel";
 import { generateImage, cancelGeneration, getExecutionMode, setExecutionMode, podStop, fetchStatus } from "./components/api-service";
 import type { ExecutionMode } from "./components/types";
+import { ExecutionModeDropdown } from "./components/execution-mode-dropdown";
 import type { StyleKey } from "./components/brand-logos";
 import { AuthProvider, useAuth } from "./components/auth-context";
 import { LoginScreen } from "./components/login-screen";
@@ -595,6 +596,16 @@ function AuthenticatedApp() {
         </div>
 
 
+        {/* Execution mode — top right */}
+        <div className="absolute top-4 right-4 z-20">
+          <ExecutionModeDropdown
+            executionMode={executionMode}
+            onExecutionModeChange={handleExecutionModeChange}
+            podStatus={podStatusLabel}
+            onPodStop={handlePodStop}
+          />
+        </div>
+
         {/* Title — large with gradient outline, overlapping with prompt bar */}
         <div className="relative z-10 leading-none mb-[-40px] select-none">
           <svg viewBox="0 0 580 160" width="580" height="160" xmlns="http://www.w3.org/2000/svg">
@@ -635,10 +646,7 @@ function AuthenticatedApp() {
             onPhaseChange={(p) => setSelectedPhase(p)}
             selectedFlow={selectedFlow}
             onFlowChange={setSelectedFlow}
-            executionMode={executionMode}
-            onExecutionModeChange={handleExecutionModeChange}
-            podStatus={podStatusLabel}
-            onPodStop={handlePodStop}
+
             referencedImage={referencedImage}
             onClearReference={handleClearReference}
             attachedImage={attachedImage}
@@ -662,7 +670,17 @@ function AuthenticatedApp() {
       style={{ background: "#0c0f16" }}
     >
       {/* Main chat area */}
-      <div className="flex-1 min-w-0 flex flex-col">
+      <div className="flex-1 min-w-0 flex flex-col relative">
+        {/* Execution mode — top right */}
+        <div className="absolute top-3 right-3 z-20">
+          <ExecutionModeDropdown
+            executionMode={executionMode}
+            onExecutionModeChange={handleExecutionModeChange}
+            podStatus={podStatusLabel}
+            onPodStop={handlePodStop}
+          />
+        </div>
+
         <div className="flex-1 min-h-0">
           <ChatPanel
             messages={messages}
