@@ -43,6 +43,7 @@ interface ChatPanelProps {
   onCancelGeneration?: () => void;
   selectedRatio?: string;
   settingsSlot?: React.ReactNode;
+  statusSlot?: React.ReactNode;
   onToggleGallery?: () => void;
   isGalleryOpen?: boolean;
 }
@@ -113,6 +114,7 @@ export function ChatPanel({
   onCancelGeneration,
   selectedRatio = "1:1",
   settingsSlot,
+  statusSlot,
   onToggleGallery,
   isGalleryOpen = false,
 }: ChatPanelProps) {
@@ -227,7 +229,7 @@ export function ChatPanel({
             <div className="w-px h-4" style={{ backgroundColor: "rgba(148,163,184,0.1)" }} />
 
             <div className="ml-1">
-              <StatusIndicator />
+              {statusSlot ?? <StatusIndicator />}
             </div>
           </div>
 

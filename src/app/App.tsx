@@ -670,17 +670,7 @@ function AuthenticatedApp() {
       style={{ background: "#0c0f16" }}
     >
       {/* Main chat area */}
-      <div className="flex-1 min-w-0 flex flex-col relative">
-        {/* Execution mode — top left */}
-        <div className="absolute top-3 left-3 z-20">
-          <ExecutionModeDropdown
-            executionMode={executionMode}
-            onExecutionModeChange={handleExecutionModeChange}
-            podStatus={podStatusLabel}
-            onPodStop={handlePodStop}
-          />
-        </div>
-
+      <div className="flex-1 min-w-0 flex flex-col">
         <div className="flex-1 min-h-0">
           <ChatPanel
             messages={messages}
@@ -694,6 +684,14 @@ function AuthenticatedApp() {
             onGenerateFromConcept={handleGenerateFromConcept}
             onCancelGeneration={handleCancelGeneration}
             selectedRatio={selectedRatio}
+            statusSlot={
+              <ExecutionModeDropdown
+                executionMode={executionMode}
+                onExecutionModeChange={handleExecutionModeChange}
+                podStatus={podStatusLabel}
+                onPodStop={handlePodStop}
+              />
+            }
             onToggleGallery={() => setGridPanelOpen((prev) => !prev)}
             isGalleryOpen={gridPanelOpen}
           />
