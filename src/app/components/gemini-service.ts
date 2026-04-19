@@ -4,7 +4,16 @@
  */
 
 import type { ChatMessage } from './llm-service';
-import { supabaseUrl, supabaseKey } from './supabase-client';
+import { supabaseUrl, supabaseKey, supabase } from './supabase-client';
+
+async function authHeader(): Promise<string> {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const t = data?.session?.access_token;
+    if (t) return `Bearer ${t}`;
+  } catch { /* ignore */ }
+  return `Bearer ${supabaseKey}`;
+}
 
 const LLM_PROXY_URL = `${supabaseUrl}/functions/v1/server/make-server-1a0af268/llm/chat`;
 
@@ -72,7 +81,7 @@ export async function streamGeminiChat(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${supabaseKey}`,
+        'Authorization': await authHeader(),
       },
       body: JSON.stringify({
         messages,

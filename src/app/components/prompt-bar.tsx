@@ -9,6 +9,7 @@ import {
   Lock,
 } from 'lucide-react';
 import { STYLE_CONFIG, type StyleKey, IndusLogo, PhonePeLogo, ShareMarketLogo, GenericLogo } from './brand-logos';
+import { DropdownPopover } from './dropdown-popover';
 
 export type FlowType = 'icon' | 'spot' | 'banner';
 
@@ -38,7 +39,7 @@ interface PromptBarProps {
   isCentered: boolean;
 }
 
-const BRANDS = ['Indus', 'PhonePe', 'Share.Market', 'Generic'] as const;
+const BRANDS = ['PhonePe', 'Indus', 'Share.Market', 'Generic'] as const;
 
 const BRAND_LOGOS: Record<string, React.FC<{ size?: number }>> = {
   'Indus': IndusLogo,
@@ -77,7 +78,8 @@ export function PromptBar({
 }: PromptBarProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [phaseDropdownOpen, setPhaseDropdownOpen] = useState(false);
-  const phaseDropdownRef = useRef<HTMLDivElement>(null);
+  const phaseTriggerRef = useRef<HTMLButtonElement>(null);
+  const splitButtonWrapRef = useRef<HTMLDivElement>(null);
 
   // Theme no longer used for UI colors — everything is neutral
 
@@ -100,22 +102,14 @@ export function PromptBar({
     }
   }, [isCentered]);
 
-  // Close dropdowns on outside click
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (phaseDropdownRef.current && !phaseDropdownRef.current.contains(event.target as Node)) {
-        setPhaseDropdownOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
+  // click-outside + Escape handled inside DropdownPopover
 
-  // Handle Enter key
+  // Handle Enter key — allow sending while another generation is in flight
+  // (concurrent generations are supported end-to-end)
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (!isGenerating && prompt.trim()) {
+      if (prompt.trim()) {
         onSend();
       }
     }
@@ -194,15 +188,22 @@ export function PromptBar({
           })}
         </div>
 
-        {/* Textarea */}
-        <div className="px-4 pt-3 pb-1">
+        {/* Textarea row — attach icon on the left, textarea fills remaining */}
+        <div className="flex items-start gap-2 px-4 pt-3 pb-1">
+          <button
+            onClick={onAttach}
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-300 hover:bg-white/5 transition-colors flex-shrink-0 mt-0.5"
+            title="Attach an image"
+          >
+            <Paperclip size={15} />
+          </button>
           <textarea
             ref={textareaRef}
             value={prompt}
             onChange={(e) => onPromptChange(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={isCentered ? "What do you want to create?" : "Describe what you want to create..."}
-            className="w-full bg-transparent text-white text-[16px] leading-relaxed resize-none outline-none placeholder:text-slate-500"
+            className="flex-1 bg-transparent text-white text-[16px] leading-relaxed resize-none outline-none placeholder:text-slate-500"
             style={{ fontFamily: 'Inter, system-ui, sans-serif', minHeight: isCentered ? '56px' : '44px' }}
             rows={1}
           />
@@ -244,84 +245,102 @@ export function PromptBar({
             })}
           </div>
 
-          {/* Right — phase dropdown, attach, send */}
-          <div className="flex items-center gap-1">
-            {/* Phase dropdown */}
-            <div ref={phaseDropdownRef} className="relative">
+          {/* Right — split send button: phase label (opens dropdown) | separator | arrow (sends) */}
+          {/* Button stays enabled while another generation is in flight so
+               users can queue up multiple requests. */}
+          <div ref={splitButtonWrapRef} className="relative">
+            <div
+              className="flex items-stretch rounded-lg overflow-hidden transition-all"
+              style={{
+                backgroundColor: !prompt.trim()
+                  ? 'rgba(148,163,184,0.15)'
+                  : '#e2e8f0',
+              }}
+            >
+              {/* Left half — opens dropdown */}
               <button
+                ref={phaseTriggerRef}
                 onClick={() => setPhaseDropdownOpen(!phaseDropdownOpen)}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[14px] font-medium transition-colors hover:bg-white/5"
+                className="flex items-center gap-1 px-2.5 py-1.5 text-[13px] font-medium transition-colors"
                 style={{
-                  color: selectedPhase ? '#e2e8f0' : '#64748b',
-                  backgroundColor: selectedPhase ? 'rgba(148,163,184,0.1)' : 'transparent',
-                  border: selectedPhase ? '1px solid rgba(148,163,184,0.2)' : '1px solid transparent',
+                  color: !prompt.trim() ? '#64748b' : '#0f172a',
                 }}
+                title="Choose phase"
               >
                 {selectedPhase
                   ? PHASES.find(p => p.key === selectedPhase)?.label
                   : 'Auto'}
-                <ChevronDown size={11} style={{ opacity: 0.5 }} />
+                <ChevronDown size={11} style={{ opacity: 0.6 }} />
               </button>
 
-              {phaseDropdownOpen && (
-                <div
-                  className="absolute bottom-full right-0 mb-2 rounded-xl border py-1 min-w-[150px] z-50"
-                  style={{
-                    backgroundColor: '#1a1f2e',
-                    borderColor: 'rgba(148,163,184,0.1)',
-                    backdropFilter: 'blur(20px)',
-                  }}
-                >
-                  <button
-                    onClick={() => { onPhaseChange(null); setPhaseDropdownOpen(false); }}
-                    className={`w-full px-3 py-2 text-left text-xs transition-colors ${
-                      selectedPhase === null
-                        ? 'text-slate-200 bg-white/5'
-                        : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'
-                    }`}
-                  >
-                    <span>Auto-detect</span>
-                    <span className="block text-[10px] opacity-50 mt-0.5">Choose based on prompt</span>
-                  </button>
-                  <div className="h-px bg-white/5 my-1" />
-                  {PHASES.map((phase) => (
-                    <button
-                      key={phase.key}
-                      onClick={() => { onPhaseChange(phase.key); setPhaseDropdownOpen(false); }}
-                      className={`w-full px-3 py-2 text-left text-xs transition-colors ${
-                        selectedPhase === phase.key
-                          ? 'text-slate-200 bg-white/5'
-                          : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
-                      }`}
-                    >
-                      {phase.label}
-                    </button>
-                  ))}
-                </div>
-              )}
+              {/* Separator */}
+              <div
+                className="w-px self-stretch my-1"
+                style={{
+                  backgroundColor: !prompt.trim()
+                    ? 'rgba(148,163,184,0.3)'
+                    : 'rgba(15,23,42,0.2)',
+                }}
+              />
+
+              {/* Right half — sends */}
+              <button
+                onClick={onSend}
+                disabled={!prompt.trim()}
+                className="px-2 py-1.5 transition-all disabled:cursor-not-allowed"
+                style={{
+                  color: !prompt.trim() ? '#64748b' : '#0f172a',
+                }}
+                title={isGenerating ? 'Queue another (concurrent)' : 'Send (Enter)'}
+              >
+                <ArrowUp size={15} strokeWidth={2.5} />
+              </button>
             </div>
 
-            {/* Attachment */}
-            <button
-              onClick={onAttach}
-              className="p-1.5 rounded-lg text-slate-500 hover:text-slate-300 hover:bg-white/5 transition-colors"
-              title="Attach an image"
+            <DropdownPopover
+              open={phaseDropdownOpen}
+              onClose={() => setPhaseDropdownOpen(false)}
+              triggerRef={phaseTriggerRef}
+              align="end"
+              direction="up"
+              offset={8}
             >
-              <Paperclip size={15} />
-            </button>
-
-            {/* Send button */}
-            <button
-              onClick={onSend}
-              disabled={isGenerating || !prompt.trim()}
-              className="p-1.5 rounded-lg transition-all disabled:cursor-not-allowed"
-              style={{
-                backgroundColor: (!prompt.trim() || isGenerating) ? 'rgba(148,163,184,0.15)' : '#e2e8f0',
-                color: (!prompt.trim() || isGenerating) ? '#64748b' : '#0f172a',
-              }}
-            >
-              <ArrowUp size={15} strokeWidth={2.5} />
-            </button>
+              <div
+                className="rounded-xl border py-1 min-w-[160px]"
+                style={{
+                  backgroundColor: '#1a1f2e',
+                  borderColor: 'rgba(148,163,184,0.1)',
+                  backdropFilter: 'blur(20px)',
+                  boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+                }}
+              >
+                <button
+                  onClick={() => { onPhaseChange(null); setPhaseDropdownOpen(false); }}
+                  className={`w-full px-3 py-2 text-left text-xs transition-colors ${
+                    selectedPhase === null
+                      ? 'text-slate-200 bg-white/5'
+                      : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'
+                  }`}
+                >
+                  <span>Auto-detect</span>
+                  <span className="block text-[10px] opacity-50 mt-0.5">Choose based on prompt</span>
+                </button>
+                <div className="h-px bg-white/5 my-1" />
+                {PHASES.map((phase) => (
+                  <button
+                    key={phase.key}
+                    onClick={() => { onPhaseChange(phase.key); setPhaseDropdownOpen(false); }}
+                    className={`w-full px-3 py-2 text-left text-xs transition-colors ${
+                      selectedPhase === phase.key
+                        ? 'text-slate-200 bg-white/5'
+                        : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+                    }`}
+                  >
+                    {phase.label}
+                  </button>
+                ))}
+              </div>
+            </DropdownPopover>
           </div>
         </div>
       </div>

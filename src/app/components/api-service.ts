@@ -1,13 +1,27 @@
 import type { StatusInfo, PodStatus, ExecutionMode } from "./types";
-import { supabaseUrl, supabaseKey } from "./supabase-client";
+import { supabaseUrl, supabaseKey, supabase } from "./supabase-client";
 
 // ─── Supabase Edge Function Base URL ────────────────────────────────────────
 const SUPABASE_FUNCTIONS_BASE = `${supabaseUrl}/functions/v1/server/make-server-1a0af268`;
 
-function supabaseHeaders(): Record<string, string> {
+/**
+ * Build auth headers. Uses the current user's Supabase access_token so the
+ * edge function can verify the JWT and attach `{id, email}` to the request.
+ * Falls back to the anon key if there's no session (which will cause the
+ * edge function to return 401 — deliberate).
+ */
+async function supabaseHeaders(): Promise<Record<string, string>> {
+  let token = supabaseKey;
+  try {
+    const { data } = await supabase.auth.getSession();
+    const accessToken = data?.session?.access_token;
+    if (accessToken) token = accessToken;
+  } catch {
+    // fall through — use anon key, endpoint will 401
+  }
   return {
     "Content-Type": "application/json",
-    "Authorization": `Bearer ${supabaseKey}`,
+    "Authorization": `Bearer ${token}`,
   };
 }
 
@@ -55,10 +69,13 @@ export function getCachedStatus(): StatusInfo {
   return { ...cachedStatus };
 }
 
-export async function fetchStatus(): Promise<StatusInfo> {
+export async function fetchStatus(mode?: ExecutionMode): Promise<StatusInfo> {
   try {
-    const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/status`, {
-      headers: supabaseHeaders(),
+    const url = mode
+      ? `${SUPABASE_FUNCTIONS_BASE}/comfyui/status?mode=${mode}`
+      : `${SUPABASE_FUNCTIONS_BASE}/comfyui/status`;
+    const res = await fetch(url, {
+      headers: await supabaseHeaders(),
       signal: AbortSignal.timeout(8000),
     });
 
@@ -84,6 +101,12 @@ export async function fetchStatus(): Promise<StatusInfo> {
       gpu: health.gpu,
       uptime: health.uptime,
       cost_per_hr: health.cost_per_hr,
+      queue_running: health.queue_running,
+      queue_pending: health.queue_pending,
+      avg_exec_seconds: health.avg_exec_seconds,
+      eta_seconds: health.eta_seconds,
+      idle_remaining_seconds: health.idle_remaining_seconds,
+      idle_timeout_seconds: health.idle_timeout_seconds,
     };
     return { ...cachedStatus };
   } catch (err: unknown) {
@@ -101,7 +124,7 @@ export async function fetchStatus(): Promise<StatusInfo> {
 export async function getExecutionMode(): Promise<ExecutionMode> {
   try {
     const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/mode`, {
-      headers: supabaseHeaders(),
+      headers: await supabaseHeaders(),
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return "serverless";
@@ -116,7 +139,7 @@ export async function setExecutionMode(mode: ExecutionMode): Promise<boolean> {
   try {
     const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/mode`, {
       method: "POST",
-      headers: supabaseHeaders(),
+      headers: await supabaseHeaders(),
       body: JSON.stringify({ mode }),
     });
     return res.ok;
@@ -125,13 +148,134 @@ export async function setExecutionMode(mode: ExecutionMode): Promise<boolean> {
   }
 }
 
+// ─── User Activity History ──────────────────────────────────────────────────
+
+export interface ActivityEntry {
+  user_id?: string;
+  email?: string;
+  event: "generation.requested" | "generation.completed" | "generation.failed" | "generation.cancelled";
+  job_id?: string;
+  execution_mode?: "serverless" | "pod";
+  prompt?: string;
+  style?: string;
+  flow?: string;
+  mode?: string;
+  seed?: number;
+  width?: number;
+  height?: number;
+  lora_name?: string | null;
+  execution_time?: number;
+  error?: string;
+  timestamp: number;
+}
+
+export async function fetchUserHistory(
+  email: string,
+  limit = 100
+): Promise<ActivityEntry[]> {
+  try {
+    const res = await fetch(
+      `${SUPABASE_FUNCTIONS_BASE}/user/history?email=${encodeURIComponent(email)}&limit=${limit}`,
+      { headers: await supabaseHeaders(), signal: AbortSignal.timeout(15000) }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.entries || [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Global activity feed — all users, most recent first.
+ * Default: last 30 minutes, capped at 20 entries.
+ */
+export async function fetchRecentActivity(
+  limit = 20,
+  sinceMs?: number
+): Promise<ActivityEntry[]> {
+  try {
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    if (sinceMs) params.set("since", String(sinceMs));
+    const res = await fetch(
+      `${SUPABASE_FUNCTIONS_BASE}/activity/recent?${params.toString()}`,
+      { headers: await supabaseHeaders(), signal: AbortSignal.timeout(10000) }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.entries || [];
+  } catch {
+    return [];
+  }
+}
+
+// ─── Gallery (persistent, stored on RunPod volume) ──────────────────────────
+
+export interface GalleryEntry {
+  key: string;
+  prompt: string;
+  email?: string;
+  user_id?: string;
+  style?: string;
+  flow?: string;
+  mode?: string;
+  seed?: number;
+  width?: number;
+  height?: number;
+  execution_time?: number;
+  execution_mode?: "serverless" | "pod";
+  lora_name?: string | null;
+  job_id: string;
+  timestamp: number;
+}
+
+export async function fetchGallery(
+  scope: "mine" | "team",
+  email?: string,
+  limit = 50
+): Promise<GalleryEntry[]> {
+  try {
+    const params = new URLSearchParams();
+    params.set("limit", String(limit));
+    if (scope === "mine") {
+      if (!email) return [];
+      params.set("email", email);
+    }
+    const res = await fetch(
+      `${SUPABASE_FUNCTIONS_BASE}/gallery/${scope}?${params.toString()}`,
+      { headers: await supabaseHeaders(), signal: AbortSignal.timeout(15000) }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.entries || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function fetchGalleryImage(key: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `${SUPABASE_FUNCTIONS_BASE}/gallery/image?key=${encodeURIComponent(key)}`,
+      { headers: await supabaseHeaders(), signal: AbortSignal.timeout(30000) }
+    );
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.image || null;
+  } catch {
+    return null;
+  }
+}
+
 // ─── Pod Control ────────────────────────────────────────────────────────────
 
-export async function podStart(): Promise<{ success: boolean; message?: string }> {
+export async function podStart(email?: string): Promise<{ success: boolean; message?: string }> {
   try {
     const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/pod/start`, {
       method: "POST",
-      headers: supabaseHeaders(),
+      headers: await supabaseHeaders(),
+      body: email ? JSON.stringify({ email }) : undefined,
       signal: AbortSignal.timeout(30000),
     });
     return await res.json();
@@ -144,7 +288,7 @@ export async function podStop(): Promise<{ success: boolean; message?: string }>
   try {
     const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/pod/stop`, {
       method: "POST",
-      headers: supabaseHeaders(),
+      headers: await supabaseHeaders(),
       signal: AbortSignal.timeout(15000),
     });
     return await res.json();
@@ -194,29 +338,52 @@ export async function getWorkflowInfo(
 }
 
 // ─── Generation Cancel Support ───────────────────────────────────────────────
+// Each generation has a unique ID; we track all of them so concurrent
+// requests from the same session don't clobber each other.
 
-let currentAbortController: AbortController | null = null;
-let currentJobId: string | null = null;
+interface ActiveGeneration {
+  controller: AbortController;
+  jobId: string | null;
+  // Context we remember so we can log a meaningful cancel even if the
+  // server-side metadata has been cleaned up.
+  email?: string;
+  user_id?: string;
+  prompt?: string;
+  execution_mode?: ExecutionMode;
+}
 
-export async function cancelGeneration() {
-  if (currentAbortController) {
-    currentAbortController.abort();
-    currentAbortController = null;
-    console.log("[Picasso] Generation cancelled by user");
-  }
-  // Also cancel the RunPod job so it stops using GPU
-  if (currentJobId) {
-    const jobId = currentJobId;
-    currentJobId = null;
+const activeGenerations = new Map<string, ActiveGeneration>();
+
+function newGenerationId(): string {
+  return `gen-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export async function cancelGeneration(genId?: string) {
+  const toCancel = genId
+    ? [[genId, activeGenerations.get(genId)]].filter(([, v]) => v) as [string, ActiveGeneration][]
+    : Array.from(activeGenerations.entries());
+
+  for (const [id, gen] of toCancel) {
+    gen.controller.abort();
+    console.log(`[Picasso] Generation ${id} cancelled`);
+    // Always POST to the cancel endpoint so the activity log is updated,
+    // even if we never received a job_id yet (e.g. pod still starting).
     try {
-      await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/cancel/${jobId}`, {
+      const cancelJobId = gen.jobId || id; // fall back to local gen id
+      await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/cancel/${cancelJobId}`, {
         method: "POST",
-        headers: supabaseHeaders(),
+        headers: await supabaseHeaders(),
+        body: JSON.stringify({
+          email: gen.email,
+          user_id: gen.user_id,
+          prompt: gen.prompt,
+          execution_mode: gen.execution_mode,
+        }),
       });
-      console.log(`[Picasso] RunPod job ${jobId} cancel requested`);
     } catch (err) {
-      console.log(`[Picasso] Failed to cancel RunPod job ${jobId}:`, err);
+      console.log(`[Picasso] Failed to cancel:`, err);
     }
+    activeGenerations.delete(id);
   }
 }
 
@@ -234,6 +401,9 @@ export interface GenerateRequest {
   referenceImage?: string | null;
   lora_name?: string | null;
   lora_strength?: number;
+  user_id?: string;
+  email?: string;
+  execution_mode?: ExecutionMode;
 }
 
 export interface GenerateResponse {
@@ -249,18 +419,28 @@ export interface GenerateResponse {
 
 interface GenerateCallbacks {
   onPhase?: (phase: string, progress: number) => void;
+  onGenerationId?: (id: string) => void;
 }
 
 export async function generateImage(
   req: GenerateRequest,
   callbacks?: GenerateCallbacks
 ): Promise<GenerateResponse> {
-  const { onPhase } = callbacks || {};
+  const { onPhase, onGenerationId } = callbacks || {};
 
-  // Set up abort controller for cancellation
-  currentAbortController = new AbortController();
-  currentJobId = null;
-  const { signal } = currentAbortController;
+  // Set up abort controller for cancellation (per-call, not global)
+  const genId = newGenerationId();
+  const controller = new AbortController();
+  activeGenerations.set(genId, {
+    controller,
+    jobId: null,
+    email: req.email,
+    user_id: req.user_id,
+    prompt: req.prompt,
+    execution_mode: req.execution_mode,
+  });
+  onGenerationId?.(genId);
+  const { signal } = controller;
 
   onPhase?.("Preparing request...", 5);
 
@@ -299,7 +479,7 @@ export async function generateImage(
   try {
     const submitRes = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/generate`, {
       method: "POST",
-      headers: supabaseHeaders(),
+      headers: await supabaseHeaders(),
       body: JSON.stringify({
         prompt: req.prompt,
         width,
@@ -311,6 +491,9 @@ export async function generateImage(
         reference_image: hasReference ? referenceImageData : undefined,
         lora_name: loraName,
         lora_strength: loraStrength,
+        user_id: req.user_id,
+        email: req.email,
+        execution_mode: req.execution_mode,
       }),
       signal,
     });
@@ -336,32 +519,52 @@ export async function generateImage(
           // Retry the generate request
           const retryRes = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/generate`, {
             method: "POST",
-            headers: supabaseHeaders(),
+            headers: await supabaseHeaders(),
             body: JSON.stringify({
               prompt: req.prompt, width, height, seed,
               style: req.style, flow: req.flow,
               mode: hasReference ? "controlnet" : undefined,
               reference_image: hasReference ? referenceImageData : undefined,
               lora_name: loraName, lora_strength: loraStrength,
+              user_id: req.user_id, email: req.email,
+              execution_mode: req.execution_mode,
             }),
             signal,
           });
 
           if (retryRes.status === 503) continue; // Still starting
 
-          if (retryRes.ok) {
-            const retrySubmitData = await retryRes.json();
-            const retryJobId = retrySubmitData.job_id || retrySubmitData.id;
+          // Parse body ONCE — can't call .json() and .text() on the same body
+          let bodyText = "";
+          let bodyJson: Record<string, unknown> | null = null;
+          try {
+            bodyText = await retryRes.text();
+            if (bodyText) bodyJson = JSON.parse(bodyText);
+          } catch {
+            /* body wasn't JSON */
+          }
+
+          // If the response says "retry" even without 503, keep waiting
+          if (bodyJson?.retry === true) continue;
+
+          if (retryRes.ok && bodyJson) {
+            const retryJobId = (bodyJson.job_id || bodyJson.id) as string | undefined;
             if (retryJobId) {
-              currentJobId = retryJobId;
+              const gen = activeGenerations.get(genId);
+              if (gen) gen.jobId = retryJobId;
               console.log(`[Picasso] Job submitted after pod ready: ${retryJobId}`);
               onPhase?.("Generation queued...", 30);
               return await pollRunPodJob(retryJobId, req, seed, signal, onPhase);
             }
           }
 
-          const errText = await retryRes.text().catch(() => "");
-          throw new Error(`Generation failed after pod start: ${errText.substring(0, 200)}`);
+          // Build an informative error using the best info we have
+          const serverError =
+            (bodyJson?.error as string) ||
+            (bodyJson?.message as string) ||
+            bodyText ||
+            `HTTP ${retryRes.status}`;
+          throw new Error(`Pod ready but generation failed: ${serverError.substring(0, 240)}`);
         }
         throw new Error("Pod startup timed out after 5 minutes");
       }
@@ -378,7 +581,8 @@ export async function generateImage(
       throw new Error(submitData.error || `No job ID returned: ${JSON.stringify(submitData).substring(0, 200)}`);
     }
 
-    currentJobId = jobId;
+    const gen = activeGenerations.get(genId);
+    if (gen) gen.jobId = jobId;
     console.log(`[Picasso] Job submitted: ${jobId}`);
     onPhase?.("Generation queued...", 15);
 
@@ -395,8 +599,7 @@ export async function generateImage(
     onPhase?.("Generation failed", 0);
     return makeError(req, (err as Error).message);
   } finally {
-    currentAbortController = null;
-    currentJobId = null;
+    activeGenerations.delete(genId);
   }
 }
 
@@ -441,18 +644,33 @@ async function pollRunPodJob(
     if (signal.aborted) throw new Error("Generation cancelled");
     attempts++;
 
-    const phase = [...phaseMessages].reverse().find((p) => attempts >= p.at);
-    if (phase) onPhase?.(phase.msg, phase.pct);
+    let defaultPhase = [...phaseMessages].reverse().find((p) => attempts >= p.at);
 
     try {
       const res = await fetch(`${SUPABASE_FUNCTIONS_BASE}/comfyui/status/${jobId}`, {
-        headers: supabaseHeaders(),
+        headers: await supabaseHeaders(),
         signal,
       });
 
-      if (!res.ok) continue; // Transient error, keep polling
+      if (!res.ok) {
+        if (defaultPhase) onPhase?.(defaultPhase.msg, defaultPhase.pct);
+        continue; // Transient error, keep polling
+      }
 
       const data = await res.json();
+
+      // Pod mode — show queue position + ETA if we have it
+      if (data.queue_position !== undefined && data.queue_position > 0) {
+        const etaStr = data.eta_seconds ? ` · ~${data.eta_seconds < 60 ? data.eta_seconds + 's' : Math.ceil(data.eta_seconds / 60) + 'm'}` : '';
+        onPhase?.(
+          `Queued — #${data.queue_position} of ${data.queue_pending || data.queue_position}${etaStr}`,
+          20
+        );
+      } else if (data.queue_position === 0) {
+        onPhase?.("Generating...", 50);
+      } else if (defaultPhase) {
+        onPhase?.(defaultPhase.msg, defaultPhase.pct);
+      }
 
       if (
         data.status === "FAILED" ||

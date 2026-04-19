@@ -12,12 +12,18 @@ export interface ChatMessage {
     time: number;
   };
   timestamp: Date;
+  // In-flight generation state (bot messages only, while generating)
+  pending?: boolean;
+  phase?: string;
+  progress?: number;
+  generationId?: string;
+  ratio?: string;
 }
 
 export type ExecutionMode = "serverless" | "pod";
 
 // Statuses for both serverless and pod modes
-export type PodStatus = "ready" | "starting" | "creating" | "comfyui_loading" | "stopped" | "none" | "unknown" | "error";
+export type PodStatus = "ready" | "starting" | "creating" | "comfyui_loading" | "stopped" | "none" | "unknown" | "error" | "degraded";
 
 export interface StatusInfo {
   connected: boolean;
@@ -32,6 +38,14 @@ export interface StatusInfo {
   gpu?: string;
   uptime?: number;
   cost_per_hr?: number;
+  // Queue + ETA (both modes)
+  queue_running?: number;
+  queue_pending?: number;
+  avg_exec_seconds?: number;
+  eta_seconds?: number;
+  // Pod idle auto-stop countdown
+  idle_remaining_seconds?: number | null;
+  idle_timeout_seconds?: number;
 }
 
 export const ASPECT_RATIOS: Record<string, { width: number; height: number }> = {

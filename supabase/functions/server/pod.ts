@@ -16,6 +16,10 @@ const GRAPHQL_URL = "https://api.runpod.io/graphql";
 const KV_POD_ID = "indus_pod_id";
 const KV_POD_LAST_ACTIVITY = "indus_pod_last_activity";
 const KV_EXECUTION_MODE = "indus_execution_mode";
+// List of pod IDs this app has created. The only pods we will ever
+// manage/stop. Protects unrelated pods (e.g. LORA-TRAINING) even if someone
+// manually names something similarly.
+const KV_MANAGED_POD_IDS = "picasso_managed_pod_ids";
 
 // ─── Pod Configuration ──────────────────────────────────────────────────────
 
@@ -26,7 +30,7 @@ const POD_CONFIG = {
   datacenterId: Deno.env.get("RUNPOD_POD_DATACENTER_ID") || "US-NC-2",
   volumeId: Deno.env.get("RUNPOD_POD_VOLUME_ID") || "w4cfdar27u",
   comfyuiPort: 8188,
-  autoStopMinutes: 5,
+  autoStopMinutes: 4,
   gpuFallbacks: [
     "NVIDIA RTX PRO 6000 Blackwell Server Edition",
     "NVIDIA RTX PRO 6000 Blackwell Workstation Edition",
@@ -122,6 +126,12 @@ interface PodInfo {
  * Find any existing Indus/ComfyUI pod on the RunPod account.
  */
 export async function findPod(): Promise<PodInfo | null> {
+  const managed = await getManagedPodIds();
+  if (managed.length === 0) {
+    console.log(`[Pod] No managed pods in list`);
+    return null;
+  }
+
   const result = await gql(`
     query {
       myself {
@@ -138,32 +148,105 @@ export async function findPod(): Promise<PodInfo | null> {
   const pods = (result.data as Record<string, unknown>)?.myself as Record<string, unknown>;
   const podList = (pods?.pods as PodInfo[]) || [];
 
+  // Prune managed IDs that no longer exist on the account
+  const existingIds = new Set(podList.map((p) => p.id));
+  for (const id of managed) {
+    if (!existingIds.has(id)) await removeManagedPodId(id);
+  }
+
+  // Prefer a RUNNING managed pod; otherwise any managed pod
+  let running: PodInfo | null = null;
+  let anyManaged: PodInfo | null = null;
   for (const pod of podList) {
-    const name = (pod.name || "").toLowerCase();
-    if (name.includes("indus") || name.includes("comfyui")) {
-      console.log(`[Pod] Found: ${pod.name} (${pod.id}) — ${pod.desiredStatus}`);
-      // Cache the pod ID
-      await kv.set(KV_POD_ID, pod.id).catch(() => {});
-      return pod;
+    if (!managed.includes(pod.id)) continue;
+    if (!anyManaged) anyManaged = pod;
+    if (pod.desiredStatus === "RUNNING") {
+      running = pod;
+      break;
     }
   }
 
-  console.log(`[Pod] No existing Indus/ComfyUI pod found`);
+  const chosen = running || anyManaged;
+  if (chosen) {
+    console.log(`[Pod] Found managed: ${chosen.name} (${chosen.id}) — ${chosen.desiredStatus}`);
+    await kv.set(KV_POD_ID, chosen.id).catch(() => {});
+    return chosen;
+  }
+
+  console.log(`[Pod] No managed pods currently exist on the account`);
   return null;
 }
 
 // ─── Pod Lifecycle ──────────────────────────────────────────────────────────
 
 /**
+ * Sanitize a user label for inclusion in a RunPod pod name.
+ * Keeps alphanumerics and dashes; lowercases; caps at 24 chars.
+ */
+function sanitizeUserLabel(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 24);
+}
+
+/**
+ * Build pod name. Just the user label, or POD_CONFIG.name as fallback.
+ */
+function buildPodName(userLabel?: string): string {
+  if (!userLabel) return POD_CONFIG.name;
+  const clean = sanitizeUserLabel(userLabel);
+  return clean || POD_CONFIG.name;
+}
+
+// ─── Managed Pod Tracking ───────────────────────────────────────────────────
+// We only manage (stop, auto-stop, resume) pods we've created ourselves.
+// This protects any unrelated pod on the account (e.g. LORA-TRAINING) no
+// matter what its name is.
+
+async function getManagedPodIds(): Promise<string[]> {
+  try {
+    const list = await kv.get(KV_MANAGED_POD_IDS) as string[] | null;
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+async function addManagedPodId(podId: string): Promise<void> {
+  const list = await getManagedPodIds();
+  if (!list.includes(podId)) {
+    list.push(podId);
+    await kv.set(KV_MANAGED_POD_IDS, list).catch(() => {});
+  }
+}
+
+async function removeManagedPodId(podId: string): Promise<void> {
+  const list = await getManagedPodIds();
+  const filtered = list.filter((id) => id !== podId);
+  if (filtered.length !== list.length) {
+    await kv.set(KV_MANAGED_POD_IDS, filtered).catch(() => {});
+  }
+}
+
+async function isManagedPod(podId: string): Promise<boolean> {
+  const list = await getManagedPodIds();
+  return list.includes(podId);
+}
+
+/**
  * Create a new pod. Tries GPU fallback chain, first in configured datacenter,
  * then any available datacenter.
  */
-export async function createPod(): Promise<PodInfo | { error: string }> {
+export async function createPod(userLabel?: string): Promise<PodInfo | { error: string }> {
   const gpuTypes = POD_CONFIG.gpuFallbacks;
+  const podName = buildPodName(userLabel);
 
   // Pass 1: Try in configured datacenter
   for (const gpuType of gpuTypes) {
-    console.log(`[Pod] Trying ${gpuType} in ${POD_CONFIG.datacenterId}...`);
+    console.log(`[Pod] Trying ${gpuType} in ${POD_CONFIG.datacenterId} (name: ${podName})...`);
 
     const result = await gql(
       `mutation CreatePod($input: PodFindAndDeployOnDemandInput!) {
@@ -173,7 +256,7 @@ export async function createPod(): Promise<PodInfo | { error: string }> {
       }`,
       {
         input: {
-          name: POD_CONFIG.name,
+          name: podName,
           imageName: POD_CONFIG.image,
           dockerArgs: POD_CONFIG.dockerArgs,
           gpuTypeId: gpuType,
@@ -195,6 +278,7 @@ export async function createPod(): Promise<PodInfo | { error: string }> {
       const gpu = pod.machine?.gpuDisplayName || gpuType;
       console.log(`[Pod] Created: ${pod.id} on ${gpu} ($${pod.costPerHr}/hr)`);
       await kv.set(KV_POD_ID, pod.id).catch(() => {});
+      await addManagedPodId(pod.id);
       await touchActivity();
       return pod;
     }
@@ -208,7 +292,7 @@ export async function createPod(): Promise<PodInfo | { error: string }> {
   }
 
   // Pass 2: Try any datacenter (community cloud)
-  console.log(`[Pod] Trying community cloud (any datacenter)...`);
+  console.log(`[Pod] Trying community cloud (any datacenter, name: ${podName})...`);
   for (const gpuType of gpuTypes) {
     const result = await gql(
       `mutation CreatePod($input: PodFindAndDeployOnDemandInput!) {
@@ -218,7 +302,7 @@ export async function createPod(): Promise<PodInfo | { error: string }> {
       }`,
       {
         input: {
-          name: POD_CONFIG.name,
+          name: podName,
           imageName: POD_CONFIG.image,
           dockerArgs: POD_CONFIG.dockerArgs,
           gpuTypeId: gpuType,
@@ -239,6 +323,7 @@ export async function createPod(): Promise<PodInfo | { error: string }> {
       const gpu = pod.machine?.gpuDisplayName || gpuType;
       console.log(`[Pod] Created (community): ${pod.id} on ${gpu} ($${pod.costPerHr}/hr)`);
       await kv.set(KV_POD_ID, pod.id).catch(() => {});
+      await addManagedPodId(pod.id);
       await touchActivity();
       return pod;
     }
@@ -255,7 +340,7 @@ export async function createPod(): Promise<PodInfo | { error: string }> {
 /**
  * Resume a stopped pod.
  */
-export async function startPod(podId: string): Promise<PodInfo | { error: string }> {
+export async function startPod(podId: string, userLabel?: string): Promise<PodInfo | { error: string }> {
   console.log(`[Pod] Resuming ${podId}...`);
   const result = await gql(
     `mutation PodResume($podId: String!, $gpuCount: Int!) {
@@ -277,24 +362,75 @@ export async function startPod(podId: string): Promise<PodInfo | { error: string
   const errMsg = (result.errors as Array<{ message: string }>)?.[0]?.message || "Resume failed";
   console.log(`[Pod] Resume failed (${errMsg}), creating new...`);
   await kv.del(KV_POD_ID).catch(() => {});
-  return createPod();
+  return createPod(userLabel);
 }
 
 /**
  * Stop the pod to save costs.
  */
-export async function stopPod(podId?: string): Promise<void> {
-  const id = podId || (await kv.get(KV_POD_ID));
-  if (!id) return;
+export interface StopPodResult {
+  success: boolean;
+  reason?: string;
+  podId?: string;
+  name?: string;
+}
 
-  console.log(`[Pod] Stopping ${id}...`);
-  await gql(
-    `mutation PodStop($podId: String!) {
-      podStop(input: {podId: $podId}) { id desiredStatus }
+export async function stopPod(
+  podId?: string,
+  opts?: { force?: boolean }
+): Promise<StopPodResult> {
+  const id = (podId || (await kv.get(KV_POD_ID))) as string | null;
+  if (!id) return { success: false, reason: "no_pod_id" };
+
+  const pod = await getPodInfo(id);
+  const name = (pod?.name || "").toLowerCase();
+
+  // Absolute block-list — these patterns are never touched by this app,
+  // regardless of managed list or user request.
+  const PROTECTED_PATTERNS = ["lora-training", "lora_training"];
+  const isProtected = PROTECTED_PATTERNS.some((p) => name.includes(p));
+  if (isProtected) {
+    console.log(`[Pod] REFUSING to stop protected pod '${pod?.name}' (${id})`);
+    return { success: false, reason: "protected_pod", podId: id, name: pod?.name };
+  }
+
+  // For non-forced stops (e.g. idle auto-stop), require the pod to be in
+  // our managed list. For explicit user-requested stops, fall back to the
+  // cached pod_id (which was set by findPod or createPod — both return only
+  // our own pods).
+  if (!opts?.force && !(await isManagedPod(id))) {
+    console.log(`[Pod] REFUSING to auto-stop pod ${id} — not in managed list.`);
+    return { success: false, reason: "not_managed", podId: id, name: pod?.name };
+  }
+
+  console.log(`[Pod] Terminating ${id} ('${pod?.name || "?"}')...`);
+  // Terminate (not stop/pause). Termination:
+  //  - releases GPU AND container disk immediately — truly $0 when idle
+  //  - destroys the pod; next generation creates a fresh one
+  //  - network volume (ComfyUI + models + LoRAs) is untouched since it's a
+  //    separate resource remounted on the next pod
+  const res = await gql(
+    `mutation PodTerminate($podId: String!) {
+      podTerminate(input: {podId: $podId})
     }`,
     { podId: id }
   );
-  console.log(`[Pod] Stopped`);
+
+  // podTerminate returns a scalar (null on success, errors array on failure)
+  const errMsg = (res.errors as Array<{ message: string }>)?.[0]?.message;
+  if (errMsg) {
+    console.log(`[Pod] Terminate failed: ${errMsg}`);
+    return { success: false, reason: errMsg, podId: id, name: pod?.name };
+  }
+
+  // Clean up local tracking so a new pod is created next time
+  if (id === (await kv.get(KV_POD_ID))) {
+    await kv.del(KV_POD_ID).catch(() => {});
+  }
+  await removeManagedPodId(id);
+
+  console.log(`[Pod] Terminated ${id}`);
+  return { success: true, podId: id, name: pod?.name };
 }
 
 /**
@@ -387,6 +523,86 @@ export async function queuePrompt(
 
   console.log(`[Pod] Queued prompt: ${data.prompt_id}`);
   return data.prompt_id;
+}
+
+/**
+ * Cancel a specific queued / running prompt on the pod.
+ * Sends DELETE /queue with the prompt_id. Also calls /interrupt to stop
+ * the currently-executing prompt if it matches.
+ */
+export async function cancelPodJob(
+  podId: string,
+  promptId: string
+): Promise<boolean> {
+  try {
+    // Check if this prompt is currently running
+    const qpos = await getQueuePosition(podId, promptId);
+    const isRunning = qpos.position === 0;
+
+    // Remove from pending queue (safe to call even if running — just returns ok)
+    await fetch(comfyUrl(podId, "/queue"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delete: [promptId] }),
+      signal: AbortSignal.timeout(10000),
+    }).catch(() => {});
+
+    // If running, also interrupt
+    if (isRunning) {
+      await fetch(comfyUrl(podId, "/interrupt"), {
+        method: "POST",
+        signal: AbortSignal.timeout(10000),
+      }).catch(() => {});
+    }
+
+    console.log(`[Pod] Cancelled prompt ${promptId} (was running: ${isRunning})`);
+    return true;
+  } catch (err) {
+    console.log(`[Pod] Cancel error: ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/**
+ * Query ComfyUI's queue to find where our prompt sits.
+ * Returns queuePosition (0 = running, 1 = next, etc.) or -1 if not found.
+ */
+export async function getQueuePosition(
+  podId: string,
+  promptId: string
+): Promise<{ position: number; running: number; pending: number }> {
+  try {
+    const res = await fetch(comfyUrl(podId, "/queue"), {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return { position: -1, running: 0, pending: 0 };
+
+    const data = await res.json();
+    const running = (data.queue_running as unknown[]) || [];
+    const pending = (data.queue_pending as unknown[]) || [];
+
+    // If promptId is empty, caller just wants total queue depth
+    if (!promptId) {
+      return { position: -1, running: running.length, pending: pending.length };
+    }
+
+    // queue_running/pending entries are: [priority, prompt_id, workflow, extra_data, outputs_to_execute]
+    for (const entry of running) {
+      if (Array.isArray(entry) && entry[1] === promptId) {
+        return { position: 0, running: running.length, pending: pending.length };
+      }
+    }
+    for (let i = 0; i < pending.length; i++) {
+      const entry = pending[i];
+      if (Array.isArray(entry) && entry[1] === promptId) {
+        return { position: i + 1, running: running.length, pending: pending.length };
+      }
+    }
+    // Not in queue — either completed or unknown
+    return { position: -1, running: running.length, pending: pending.length };
+  } catch {
+    return { position: -1, running: 0, pending: 0 };
+  }
 }
 
 /**
@@ -486,13 +702,44 @@ export async function pollHistory(
 
 // ─── Idle Auto-Stop ─────────────────────────────────────────────────────────
 
-async function touchActivity(): Promise<void> {
+/**
+ * Reset the idle timer. Call ONLY when a real generation happens — not on
+ * status polls, otherwise the pod will never stop while the UI is open.
+ */
+export async function touchActivity(): Promise<void> {
   await kv.set(KV_POD_LAST_ACTIVITY, Date.now()).catch(() => {});
 }
 
 /**
+ * Seconds remaining until the idle auto-stop will fire.
+ * Returns null if no activity has been recorded, or 0 if already past threshold.
+ */
+export async function getIdleSecondsRemaining(): Promise<number | null> {
+  try {
+    const lastActivity = (await kv.get(KV_POD_LAST_ACTIVITY)) as number | null;
+    if (!lastActivity) return null;
+    const thresholdMs = POD_CONFIG.autoStopMinutes * 60 * 1000;
+    const elapsed = Date.now() - lastActivity;
+    const remainingMs = thresholdMs - elapsed;
+    return Math.max(0, Math.round(remainingMs / 1000));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Total idle timeout in seconds (e.g. 300 for 5 min).
+ */
+export function getIdleTimeoutSeconds(): number {
+  return POD_CONFIG.autoStopMinutes * 60;
+}
+
+/**
  * Check if the pod has been idle longer than autoStopMinutes.
- * Called on every status poll from the frontend.
+ * Called on every incoming request to the edge function.
+ *
+ * Safety: verifies the pod's name contains "indus" or "comfyui" before
+ * stopping, so we NEVER accidentally stop pods like LORA-TRAINING.
  */
 export async function checkIdleAutoStop(): Promise<boolean> {
   try {
@@ -502,14 +749,44 @@ export async function checkIdleAutoStop(): Promise<boolean> {
     const idleMs = Date.now() - lastActivity;
     const thresholdMs = POD_CONFIG.autoStopMinutes * 60 * 1000;
 
-    if (idleMs > thresholdMs) {
-      console.log(`[Pod] Idle for ${Math.round(idleMs / 1000)}s — auto-stopping...`);
-      const podId = await kv.get(KV_POD_ID);
-      if (podId) {
-        await stopPod(podId);
-        return true;
-      }
+    if (idleMs <= thresholdMs) return false;
+
+    const podId = await kv.get(KV_POD_ID) as string | null;
+    if (!podId) return false;
+
+    // Safety: only manage pods we created ourselves.
+    if (!(await isManagedPod(podId))) {
+      console.log(`[Pod] REFUSING to auto-stop pod ${podId} — not in managed list. Clearing cache.`);
+      await kv.del(KV_POD_ID).catch(() => {});
+      return false;
     }
+
+    const pod = await getPodInfo(podId);
+    if (!pod) {
+      // Pod no longer exists — prune from both caches
+      await kv.del(KV_POD_ID).catch(() => {});
+      await removeManagedPodId(podId);
+      return false;
+    }
+
+    // Already stopped — no action needed
+    if (pod.desiredStatus !== "RUNNING") return false;
+
+    // Safety: don't terminate mid-generation. If ComfyUI has anything in its
+    // queue (running or pending), refresh the activity timer and skip this
+    // idle check — the completion handler will reset the timer properly.
+    const qpos = await getQueuePosition(podId, "");
+    if (qpos.running > 0 || qpos.pending > 0) {
+      console.log(
+        `[Pod] Would auto-stop but pod has ${qpos.running} running + ${qpos.pending} pending jobs — deferring`
+      );
+      await kv.set(KV_POD_LAST_ACTIVITY, Date.now()).catch(() => {});
+      return false;
+    }
+
+    console.log(`[Pod] Idle for ${Math.round(idleMs / 1000)}s — stopping '${pod.name}' (${podId})...`);
+    await stopPod(podId);
+    return true;
   } catch (err) {
     console.log(`[Pod] Idle check error: ${(err as Error).message}`);
   }
@@ -536,6 +813,15 @@ export async function ensurePodRunning(): Promise<PodStatus> {
   // Check for cached pod ID first
   let podId = await kv.get(KV_POD_ID) as string | null;
 
+  // Only trust the cache if the pod is in our managed list. Otherwise it's
+  // a stale pointer to an unrelated pod (e.g. legacy "Indus-ComfyUI") and we
+  // should ignore it and fall through to findPod()/create.
+  if (podId && !(await isManagedPod(podId))) {
+    console.log(`[Pod] Cached pod ${podId} not in managed list — ignoring`);
+    await kv.del(KV_POD_ID).catch(() => {});
+    podId = null;
+  }
+
   // If we have a cached ID, check if that pod still exists
   if (podId) {
     const pod = await getPodInfo(podId);
@@ -543,15 +829,15 @@ export async function ensurePodRunning(): Promise<PodStatus> {
       // Pod terminated/gone — clear cache
       console.log(`[Pod] Cached pod ${podId} no longer exists`);
       await kv.del(KV_POD_ID).catch(() => {});
+      await removeManagedPodId(podId);
       podId = null;
     } else {
       const status = pod.desiredStatus;
 
       if (status === "RUNNING") {
-        // Pod running — check ComfyUI
+        // Pod running — check ComfyUI (read-only; don't touch activity timer)
         const ready = await probeComfyUI(podId);
         if (ready) {
-          await touchActivity();
           return {
             ready: true,
             podId,
@@ -601,7 +887,7 @@ export async function ensurePodRunning(): Promise<PodStatus> {
     if (status === "RUNNING") {
       const ready = await probeComfyUI(podId);
       if (ready) {
-        await touchActivity();
+        // Read-only discovery — don't touch activity timer
         return {
           ready: true,
           podId,
@@ -648,37 +934,49 @@ export async function ensurePodRunning(): Promise<PodStatus> {
 
 /**
  * Start a pod (resume or create). Non-blocking — returns immediately.
+ * userLabel (optional) is appended to the pod name when creating a new pod.
  */
-export async function startOrCreatePod(): Promise<PodStatus> {
+export async function startOrCreatePod(userLabel?: string): Promise<PodStatus> {
   let podId = await kv.get(KV_POD_ID) as string | null;
 
   if (podId) {
-    const pod = await getPodInfo(podId);
-    if (pod) {
-      if (pod.desiredStatus === "RUNNING") {
-        // Already running
-        const ready = await probeComfyUI(podId);
+    // Only reuse pods this app has created. Stale cache (e.g. pointing at a
+    // legacy "Indus-ComfyUI" pod not in the managed list) is ignored so we
+    // fall through to creating a new one with the correct username.
+    if (!(await isManagedPod(podId))) {
+      console.log(`[Pod] Cached pod ${podId} not in managed list — ignoring, will create new`);
+      await kv.del(KV_POD_ID).catch(() => {});
+      podId = null;
+    } else {
+      const pod = await getPodInfo(podId);
+      if (pod) {
+        if (pod.desiredStatus === "RUNNING") {
+          // Already running
+          const ready = await probeComfyUI(podId);
+          return {
+            ready,
+            podId,
+            status: ready ? "ready" : "comfyui_loading",
+            message: ready ? "GPU ready" : "ComfyUI loading...",
+          };
+        }
+        // Stopped — resume
+        const resumed = await startPod(podId, userLabel);
+        if ("error" in resumed) {
+          return { ready: false, podId: null, status: "error", message: resumed.error };
+        }
         return {
-          ready,
-          podId,
-          status: ready ? "ready" : "comfyui_loading",
-          message: ready ? "GPU ready" : "ComfyUI loading...",
+          ready: false,
+          podId: resumed.id,
+          status: "starting",
+          message: "Pod resuming...",
         };
       }
-      // Stopped — resume
-      const resumed = await startPod(podId);
-      if ("error" in resumed) {
-        return { ready: false, podId: null, status: "error", message: resumed.error };
-      }
-      return {
-        ready: false,
-        podId: resumed.id,
-        status: "starting",
-        message: "Pod resuming...",
-      };
+      // Pod gone — clear and fall through to create
+      await kv.del(KV_POD_ID).catch(() => {});
+      await removeManagedPodId(podId);
+      podId = null;
     }
-    // Pod gone — clear and create
-    await kv.del(KV_POD_ID).catch(() => {});
   }
 
   // Try to find existing pod first
@@ -694,7 +992,7 @@ export async function startOrCreatePod(): Promise<PodStatus> {
       };
     }
     if (found.desiredStatus === "STOPPED" || found.desiredStatus === "EXITED") {
-      const resumed = await startPod(found.id);
+      const resumed = await startPod(found.id, userLabel);
       if ("error" in resumed) {
         return { ready: false, podId: null, status: "error", message: resumed.error };
       }
@@ -709,7 +1007,7 @@ export async function startOrCreatePod(): Promise<PodStatus> {
 
   // No pod — create new
   console.log(`[Pod] No pod found, creating...`);
-  const created = await createPod();
+  const created = await createPod(userLabel);
   if ("error" in created) {
     return { ready: false, podId: null, status: "error", message: created.error };
   }

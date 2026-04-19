@@ -226,6 +226,30 @@ export async function pollServerlessJob(jobId: string): Promise<ServerlessJobRes
   };
 }
 
+/**
+ * Cancel a serverless job.
+ * POST /v2/{endpoint_id}/cancel/{job_id}
+ */
+export async function cancelServerlessJob(jobId: string): Promise<boolean> {
+  try {
+    const res = await fetch(serverlessUrl(`/cancel/${jobId}`), {
+      method: "POST",
+      headers: apiHeaders(),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      console.log(`[Picasso] Serverless job ${jobId} cancelled`);
+      return true;
+    }
+    const text = await res.text().catch(() => "");
+    console.log(`[Picasso] Cancel non-200 for ${jobId}: ${res.status} ${text.substring(0, 100)}`);
+    return false;
+  } catch (err) {
+    console.log(`[Picasso] Cancel error for ${jobId}: ${(err as Error).message}`);
+    return false;
+  }
+}
+
 // ─── Workflow Node Mapping ───────────────────────────────────────────────────
 
 export interface WorkflowMapping {

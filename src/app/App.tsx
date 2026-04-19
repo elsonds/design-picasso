@@ -5,8 +5,11 @@ import { ChatPanel } from "./components/chat-panel";
 import { PromptBar } from "./components/prompt-bar";
 import { ImageGridPanel, type GeneratedImage } from "./components/image-grid-panel";
 import { generateImage, cancelGeneration, getExecutionMode, setExecutionMode, podStop, fetchStatus } from "./components/api-service";
-import type { ExecutionMode } from "./components/types";
+import type { ExecutionMode, StatusInfo } from "./components/types";
 import { ExecutionModeDropdown } from "./components/execution-mode-dropdown";
+import { HistoryPanel } from "./components/history-panel";
+import { ActivityFeed } from "./components/activity-feed";
+import { History, LayoutGrid } from "lucide-react";
 import type { StyleKey } from "./components/brand-logos";
 import { AuthProvider, useAuth } from "./components/auth-context";
 import { LoginScreen } from "./components/login-screen";
@@ -27,10 +30,10 @@ function MainApp() {
 function AuthGate() {
   const { user, loading } = useAuth();
 
-  // Skip auth in local development
-  if (import.meta.env.DEV) {
-    return <AuthenticatedApp />;
-  }
+  // Note: the dev auth bypass that used to live here was removed when the
+  // edge function started verifying JWTs. If you need to run locally, add
+  // http://localhost:5175/** to Supabase → Auth → URL Configuration →
+  // Additional Redirect URLs, then sign in via Google normally on localhost.
 
   if (loading) {
     return (
@@ -48,51 +51,59 @@ function AuthGate() {
 }
 
 function AuthenticatedApp() {
+  const { user } = useAuth();
+
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [generationPhase, setGenerationPhase] = useState("");
-  const [generationProgress, setGenerationProgress] = useState(0);
+  // Derived: true if any message is still generating
+  const isGenerating = messages.some((m) => m.pending);
 
   // Whether we've left the landing state (first prompt sent)
   const [hasStarted, setHasStarted] = useState(false);
 
   // Prompt bar state
   const [prompt, setPrompt] = useState("");
-  const [selectedBrand, setSelectedBrand] = useState<string>("Indus");
+  const [selectedBrand, setSelectedBrand] = useState<string>("PhonePe");
   const [selectedPhase, setSelectedPhase] = useState<"conceptualise" | "generate" | null>(null);
   const [selectedFlow, setSelectedFlow] = useState<"icon" | "banner" | "spot">("icon");
 
   // Execution mode
   const [executionMode, setExecutionModeState] = useState<ExecutionMode>("serverless");
-  const [podStatusLabel, setPodStatusLabel] = useState<string>("unknown");
+  const [statusInfo, setStatusInfo] = useState<StatusInfo | undefined>(undefined);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // Load execution mode on mount
   useEffect(() => {
     getExecutionMode().then(setExecutionModeState);
   }, []);
 
-  // Poll status for pod mode indicator
+  // Poll status every 30s for the SELECTED mode only
   useEffect(() => {
     const poll = async () => {
-      const status = await fetchStatus();
-      setPodStatusLabel(status.pod_status);
+      const status = await fetchStatus(executionMode);
+      setStatusInfo(status);
     };
     poll();
-    const interval = setInterval(poll, 15000);
+    const interval = setInterval(poll, 30000);
     return () => clearInterval(interval);
   }, [executionMode]);
 
   const handleExecutionModeChange = useCallback(async (mode: ExecutionMode) => {
     setExecutionModeState(mode);
     await setExecutionMode(mode);
+    fetchStatus(mode).then(setStatusInfo);
   }, []);
 
   const handlePodStop = useCallback(async () => {
-    await podStop();
-    setPodStatusLabel("stopped");
-  }, []);
+    const result = await podStop();
+    if (!result.success) {
+      console.warn('[Picasso] Pod stop failed:', result);
+      alert(`Couldn't stop the pod: ${result.message || 'unknown reason'}`);
+    }
+    // Re-poll status so the UI reflects the new state
+    fetchStatus(executionMode).then(setStatusInfo);
+  }, [executionMode]);
 
   // Derive ratio from flow
   const FLOW_RATIOS: Record<string, string> = { icon: "1:1", banner: "16:9", spot: "1:1" };
@@ -197,15 +208,18 @@ function AuthenticatedApp() {
     setSelectedPhase(null);
   }, []);
 
-  const handleCancelGeneration = useCallback(async () => {
+  const handleCancelGeneration = useCallback(async (genId?: string) => {
     try {
-      await cancelGeneration();
+      await cancelGeneration(genId);
     } catch (e) {
       console.warn("[Picasso] Cancel error:", e);
     }
-    setIsGenerating(false);
-    setGenerationPhase("");
-    setGenerationProgress(0);
+    // Mark cancelled message(s) as no longer pending
+    setMessages((prev) => prev.map((m) => {
+      if (!m.pending) return m;
+      if (genId && m.generationId !== genId) return m;
+      return { ...m, pending: false, phase: undefined, progress: undefined, content: m.content || "Cancelled." };
+    }));
   }, []);
 
   const handleAttach = useCallback(() => {
@@ -262,9 +276,27 @@ function AuthenticatedApp() {
 
     setSelectedPhase("generate");
     setSelectedFlow(flow);
-    setIsGenerating(true);
-    setGenerationPhase("Preparing prompt...");
-    setGenerationProgress(3);
+
+    // Create a pending bot message that tracks this generation's own progress.
+    // This lets multiple requests coexist, each with their own visual.
+    const msgId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    const updateMsg = (patch: Partial<ChatMessage>) =>
+      setMessages((prev) => prev.map((m) => (m.id === msgId ? { ...m, ...patch } : m)));
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: msgId,
+        type: "bot",
+        content: "",
+        style: selectedBrand as StyleKey,
+        pending: true,
+        phase: "Preparing prompt...",
+        progress: 3,
+        ratio: flowRatio,
+        timestamp: new Date(),
+      },
+    ]);
 
     // ─── Prompt restructuring: if a skill exists for this brand+flow,
     // call the LLM to reformat the raw prompt before sending to RunPod
@@ -272,8 +304,7 @@ function AuthenticatedApp() {
     const restructureSkill = getRestructureSkill(selectedBrand, flow);
     if (restructureSkill) {
       try {
-        setGenerationPhase("Restructuring prompt...");
-        setGenerationProgress(5);
+        updateMsg({ phase: "Restructuring prompt...", progress: 5 });
 
         const restructureMessages = [
           { role: "system" as const, content: restructureSkill },
@@ -302,8 +333,7 @@ function AuthenticatedApp() {
       }
     }
 
-    setGenerationPhase("Sending to RunPod...");
-    setGenerationProgress(8);
+    updateMsg({ phase: "Sending to RunPod...", progress: 8 });
 
     try {
       const result = await generateImage(
@@ -316,22 +346,22 @@ function AuthenticatedApp() {
           flow,
           lora_name: lora.lora_name,
           lora_strength: lora.lora_strength,
+          user_id: user?.id,
+          email: user?.email,
+          execution_mode: executionMode,
         },
         {
-          onPhase: (p, progress) => {
-            setGenerationPhase(p);
-            setGenerationProgress(progress);
-          },
+          onPhase: (p, progress) => updateMsg({ phase: p, progress }),
+          onGenerationId: (id) => updateMsg({ generationId: id }),
         }
       );
 
       if (result.success) {
-        const botMsg: ChatMessage = {
-          id: `msg-${Date.now()}`,
-          type: "bot",
-          content: "",
+        updateMsg({
+          pending: false,
+          phase: undefined,
+          progress: undefined,
           image: result.image,
-          style: selectedBrand as StyleKey,
           metadata: {
             mode: result.mode,
             seed: result.seed,
@@ -339,9 +369,7 @@ function AuthenticatedApp() {
             height: result.height,
             time: result.executionTime,
           },
-          timestamp: new Date(),
-        };
-        setMessages((prev) => [...prev, botMsg]);
+        });
 
         const genImage: GeneratedImage = {
           id: `img-${Date.now()}`,
@@ -353,24 +381,22 @@ function AuthenticatedApp() {
         setGeneratedImages((prev) => [genImage, ...prev]);
         setGridPanelOpen(true);
       } else {
-        setMessages((prev) => [...prev, {
-          id: `msg-${Date.now()}`, type: "bot",
+        updateMsg({
+          pending: false,
+          phase: undefined,
+          progress: undefined,
           content: result.error || "Generation failed.",
-          style: selectedBrand as StyleKey, timestamp: new Date(),
-        }]);
+        });
       }
     } catch {
-      setMessages((prev) => [...prev, {
-        id: `msg-${Date.now()}`, type: "bot",
+      updateMsg({
+        pending: false,
+        phase: undefined,
+        progress: undefined,
         content: "Connection error. Please check your network.",
-        style: selectedBrand as StyleKey, timestamp: new Date(),
-      }]);
-    } finally {
-      setIsGenerating(false);
-      setGenerationPhase("");
-      setGenerationProgress(0);
+      });
     }
-  }, [selectedBrand, llmConfig, llmProvider, getLoraForGeneration]);
+  }, [selectedBrand, llmConfig, llmProvider, getLoraForGeneration, executionMode, user?.id, user?.email]);
 
   // ─── Handle "Generate from concept" button in chat ──────────────────────
   const handleGenerateFromConcept = useCallback(async (concept: Concept) => {
@@ -396,7 +422,7 @@ function AuthenticatedApp() {
 
   // ─── Main send handler ─────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
-    if (!prompt.trim() || isGenerating || isStreaming) return;
+    if (!prompt.trim() || isStreaming) return;
 
     const currentPrompt = prompt.trim();
 
@@ -601,9 +627,37 @@ function AuthenticatedApp() {
           <ExecutionModeDropdown
             executionMode={executionMode}
             onExecutionModeChange={handleExecutionModeChange}
-            podStatus={podStatusLabel}
+            statusInfo={statusInfo}
             onPodStop={handlePodStop}
           />
+        </div>
+
+        {/* Gallery + History — top right */}
+        <div className="absolute top-4 right-4 z-20 flex items-center gap-2">
+          <button
+            onClick={() => setGridPanelOpen(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[13px] font-medium transition-all hover:bg-white/5"
+            style={{
+              color: '#94a3b8',
+              border: '1px solid rgba(148,163,184,0.08)',
+            }}
+            title="Gallery"
+          >
+            <LayoutGrid size={13} />
+            Gallery
+          </button>
+          <button
+            onClick={() => setHistoryOpen(true)}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-[13px] font-medium transition-all hover:bg-white/5"
+            style={{
+              color: '#94a3b8',
+              border: '1px solid rgba(148,163,184,0.08)',
+            }}
+            title="Activity Log"
+          >
+            <History size={13} />
+            History
+          </button>
         </div>
 
         {/* Title — large with gradient outline, overlapping with prompt bar */}
@@ -659,6 +713,30 @@ function AuthenticatedApp() {
 
 
         <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
+
+        <HistoryPanel
+          email={user?.email}
+          isOpen={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+        />
+        <ActivityFeed statusInfo={statusInfo} />
+
+        {/* Gallery panel — available from landing state too */}
+        {gridPanelOpen && (
+          <div className="fixed inset-0 z-40 flex justify-end" onClick={() => setGridPanelOpen(false)}>
+            <div onClick={(e) => e.stopPropagation()} className="h-full">
+              <ImageGridPanel
+                images={generatedImages}
+                isOpen={gridPanelOpen}
+                selectedImageId={selectedImageId}
+                onSelectImage={handleSelectImage}
+                onDeselectImage={handleDeselectImage}
+                onClose={() => setGridPanelOpen(false)}
+                email={user?.email}
+              />
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -677,8 +755,6 @@ function AuthenticatedApp() {
             isGenerating={isGenerating}
             isStreaming={isStreaming}
             onSendMessage={() => {}}
-            generationPhase={generationPhase}
-            generationProgress={generationProgress}
             selectedStyle={selectedBrand as StyleKey}
             onResetChat={handleResetChat}
             onGenerateFromConcept={handleGenerateFromConcept}
@@ -688,12 +764,13 @@ function AuthenticatedApp() {
               <ExecutionModeDropdown
                 executionMode={executionMode}
                 onExecutionModeChange={handleExecutionModeChange}
-                podStatus={podStatusLabel}
+                statusInfo={statusInfo}
                 onPodStop={handlePodStop}
               />
             }
             onToggleGallery={() => setGridPanelOpen((prev) => !prev)}
             isGalleryOpen={gridPanelOpen}
+            onToggleHistory={() => setHistoryOpen(true)}
           />
         </div>
 
@@ -709,10 +786,6 @@ function AuthenticatedApp() {
           onPhaseChange={(p) => setSelectedPhase(p)}
           selectedFlow={selectedFlow}
           onFlowChange={setSelectedFlow}
-          executionMode={executionMode}
-          onExecutionModeChange={handleExecutionModeChange}
-          podStatus={podStatusLabel}
-          onPodStop={handlePodStop}
           referencedImage={referencedImage}
           onClearReference={handleClearReference}
           attachedImage={attachedImage}
@@ -731,9 +804,17 @@ function AuthenticatedApp() {
         onSelectImage={handleSelectImage}
         onDeselectImage={handleDeselectImage}
         onClose={() => setGridPanelOpen(false)}
+        email={user?.email}
       />
 
       <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
+
+      <HistoryPanel
+        email={user?.email}
+        isOpen={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+      />
+      <ActivityFeed statusInfo={statusInfo} />
     </div>
   );
 }

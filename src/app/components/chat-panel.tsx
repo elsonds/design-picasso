@@ -9,12 +9,10 @@ import {
   Maximize2,
   X,
   Sparkles,
-  Trash2,
-  AlertCircle,
   User,
-  FolderDown,
   Wand2,
-  LayoutGrid,
+  Images,
+  History,
 } from "lucide-react";
 import { StatusIndicator } from "./status-indicator";
 import { GenerationVisual } from "./generation-visual";
@@ -40,12 +38,13 @@ interface ChatPanelProps {
   selectedStyle: StyleKey;
   onResetChat: () => void;
   onGenerateFromConcept?: (concept: Concept) => void;
-  onCancelGeneration?: () => void;
+  onCancelGeneration?: (genId?: string) => void;
   selectedRatio?: string;
   settingsSlot?: React.ReactNode;
   statusSlot?: React.ReactNode;
   onToggleGallery?: () => void;
   isGalleryOpen?: boolean;
+  onToggleHistory?: () => void;
 }
 
 /** Resolve the correct bot avatar for a message based on its stored style */
@@ -117,12 +116,16 @@ export function ChatPanel({
   statusSlot,
   onToggleGallery,
   isGalleryOpen = false,
+  onToggleHistory,
 }: ChatPanelProps) {
   const { user } = useAuth();
   const [fullscreenImage, setFullscreenImage] = useState<string | null>(null);
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
-  const [isDownloadingAll, setIsDownloadingAll] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Tracks whether the user is scrolled near the bottom. When false, we
+  // stop auto-scrolling on new messages/progress ticks so the user's
+  // scroll position is preserved.
+  const [stickToBottom, setStickToBottom] = useState(true);
 
   const StyleLogo = STYLE_CONFIG[selectedStyle]?.logo || STYLE_CONFIG["Indus"].logo;
 
@@ -147,33 +150,26 @@ export function ChatPanel({
     return () => window.removeEventListener("beforeunload", handleBeforeUnload);
   }, [hasGeneratedImages]);
 
+  // Auto-scroll only if the user is already near the bottom. If they've
+  // scrolled up to look at an older generation, leave them alone.
   useEffect(() => {
+    if (!stickToBottom) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isGenerating]);
+  }, [messages, isGenerating, stickToBottom]);
+
+  // Track scroll position so we know whether to follow new content or not.
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const distanceFromBottom =
+      el.scrollHeight - el.scrollTop - el.clientHeight;
+    // Consider "near bottom" as within 120px. That threshold allows a
+    // newly arriving tall message to not flip the state.
+    setStickToBottom(distanceFromBottom < 120);
+  }, []);
 
   // ─── Download all generated images ─────────────────────────────────────
-  const imageMessages = messages.filter((msg) => msg.image);
-  const imageCount = imageMessages.length;
 
-  const handleDownloadAll = useCallback(async () => {
-    if (imageCount === 0 || isDownloadingAll) return;
-    setIsDownloadingAll(true);
-
-    for (let i = 0; i < imageMessages.length; i++) {
-      const msg = imageMessages[i];
-      if (!msg.image) continue;
-      const link = document.createElement("a");
-      link.href = msg.image;
-      link.download = `${(msg.style || selectedStyle).toLowerCase()}-${msg.metadata?.seed || `image-${i + 1}`}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      if (i < imageMessages.length - 1) {
-        await new Promise((r) => setTimeout(r, 300));
-      }
-    }
-    setIsDownloadingAll(false);
-  }, [imageMessages, imageCount, isDownloadingAll, selectedStyle]);
 
   return (
     <>
@@ -243,41 +239,23 @@ export function ChatPanel({
                 style={{ color: isGalleryOpen ? '#e2e8f0' : '#64748b' }}
                 title={isGalleryOpen ? "Close Gallery" : "Open Gallery"}
               >
-                <LayoutGrid size={16} />
+                <Images size={16} />
               </button>
             )}
 
-            {/* 2. Download all */}
-            <button
-              onClick={handleDownloadAll}
-              disabled={imageCount === 0 || isDownloadingAll}
-              className="relative p-1.5 rounded-lg transition-colors hover:bg-white/5 disabled:opacity-30 disabled:cursor-not-allowed"
-              style={{ color: (imageCount > 0 && !isDownloadingAll) ? '#e2e8f0' : '#64748b' }}
-              title={imageCount > 0 ? `Save All (${imageCount})` : "No images to save"}
-            >
-              <FolderDown size={16} />
-              {imageCount > 0 && (
-                <span
-                  className="absolute -top-1 -right-1 min-w-[14px] h-[14px] rounded-full flex items-center justify-center text-[8px] font-bold text-white leading-none"
-                  style={{ background: "linear-gradient(135deg, #94a3b8, #64748b)" }}
-                >
-                  {imageCount}
-                </span>
-              )}
-            </button>
+            {/* 2. Activity history */}
+            {onToggleHistory && (
+              <button
+                onClick={onToggleHistory}
+                className="p-1.5 rounded-lg transition-colors hover:bg-white/5"
+                style={{ color: '#64748b' }}
+                title="Activity Log"
+              >
+                <History size={16} />
+              </button>
+            )}
 
-            {/* 3. Delete chat */}
-            <button
-              onClick={() => setShowResetConfirm(true)}
-              disabled={messages.length === 0 || isGenerating}
-              className="p-1.5 rounded-lg transition-colors hover:bg-white/5 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed"
-              style={{ color: (messages.length > 0 && !isGenerating) ? '#e2e8f0' : '#64748b' }}
-              title="Reset Chat"
-            >
-              <Trash2 size={16} />
-            </button>
-
-            {/* 4. Settings */}
+            {/* 3. Settings */}
             {settingsSlot && (
               <div>{settingsSlot}</div>
             )}
@@ -285,7 +263,11 @@ export function ChatPanel({
         </div>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-4 pt-6 pb-4 scrollbar-thin">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          className="flex-1 overflow-y-auto px-4 pt-6 pb-4 scrollbar-thin relative"
+        >
           {messages.length === 0 && !isGenerating && (
             <div className="flex flex-col items-center justify-center h-full text-center px-6">
               <div
@@ -415,14 +397,23 @@ export function ChatPanel({
                       </div>
                     ) : (
                       <>
-                        {msg.image && (
+                        {/* In-flight generation visual (per-message) */}
+                        {msg.pending && (
+                          <GenerationVisual
+                            phase={msg.phase || "Initializing..."}
+                            progress={msg.progress ?? 0}
+                            onCancel={onCancelGeneration ? () => onCancelGeneration(msg.generationId) : undefined}
+                            selectedRatio={msg.ratio || selectedRatio}
+                          />
+                        )}
+                        {msg.image && !msg.pending && (
                           <ImageFrame
                             src={msg.image}
                             width={msg.metadata?.width}
                             height={msg.metadata?.height}
                           />
                         )}
-                        {msg.content && !msg.image && (
+                        {msg.content && !msg.image && !msg.pending && (
                           <div
                             className="text-slate-300 text-[13px] font-['Inter',sans-serif] whitespace-pre-wrap leading-relaxed"
                           >
@@ -514,84 +505,30 @@ export function ChatPanel({
               </div>
             )}
 
-            {/* Generation visual */}
-            {isGenerating && (
-              <div
-                className="flex gap-2.5 justify-start"
-                style={{ animation: "cp-loader-enter 0.5s ease 0.2s both" }}
-              >
-                <div className="flex-shrink-0 mt-1">
-                  <div
-                    className="w-6 h-6 rounded-full overflow-hidden flex items-center justify-center"
-                    style={{ backgroundColor: "rgba(148,163,184,0.1)" }}
-                  >
-                    <StyleLogo size={24} />
-                  </div>
-                </div>
-                <div className="space-y-2 max-w-[520px]">
-                  <GenerationVisual
-                    phase={generationPhase || "Initializing..."}
-                    progress={generationProgress ?? 0}
-                    onCancel={onCancelGeneration}
-                    selectedRatio={selectedRatio}
-                  />
-                </div>
-              </div>
-            )}
-
             <div ref={messagesEndRef} />
           </div>
+
+          {/* Jump-to-latest button — only shown when user has scrolled up */}
+          {!stickToBottom && messages.length > 0 && (
+            <button
+              onClick={() => {
+                setStickToBottom(true);
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="sticky bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full text-[11px] font-medium transition-all shadow-lg"
+              style={{
+                backgroundColor: 'rgba(30, 41, 59, 0.95)',
+                color: '#e2e8f0',
+                border: '1px solid rgba(148,163,184,0.2)',
+                backdropFilter: 'blur(8px)',
+              }}
+              title="Scroll to latest"
+            >
+              Jump to latest ↓
+            </button>
+          )}
         </div>
       </div>
-
-      {/* Reset Confirmation Modal */}
-      {showResetConfirm && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm"
-          style={{ animation: "cp-modal-overlay 0.2s ease both" }}
-          onClick={() => setShowResetConfirm(false)}
-        >
-          <div
-            className="w-full max-w-sm rounded-2xl border p-6 shadow-2xl"
-            style={{
-              background: "rgba(15, 23, 42, 0.95)",
-              borderColor: "rgba(148,163,184,0.1)",
-              animation: "cp-modal-enter 0.3s ease both",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex flex-col items-center text-center gap-4">
-              <div className="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mb-1">
-                <AlertCircle size={24} className="text-red-500" />
-              </div>
-              <h3 className="text-slate-100 text-[18px] font-medium font-['Inter',sans-serif]">
-                Reset Chat?
-              </h3>
-              <p className="text-slate-400 text-[14px] font-['Inter',sans-serif] leading-relaxed">
-                This will clear all current messages and generated images.
-                <br />
-                <span className="text-slate-200 font-medium">
-                  Please ensure you have saved any important generations.
-                </span>
-              </p>
-              <div className="flex gap-3 w-full mt-2">
-                <button
-                  onClick={() => setShowResetConfirm(false)}
-                  className="flex-1 px-4 py-2.5 rounded-xl text-slate-300 text-[13px] font-medium hover:bg-white/5 transition-colors border border-slate-700/50"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => { onResetChat(); setShowResetConfirm(false); }}
-                  className="flex-1 px-4 py-2.5 rounded-xl text-white text-[13px] font-medium bg-red-500 hover:bg-red-600 transition-colors shadow-lg shadow-red-500/20"
-                >
-                  Yes, Reset
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Fullscreen image modal */}
       {fullscreenImage && (
